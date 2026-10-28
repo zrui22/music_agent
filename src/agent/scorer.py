@@ -30,17 +30,28 @@ class Scorer:
                 if cand.exists():
                     ckpt_path = cand
                     break
+        if ckpt_path is None:
+            raise RuntimeError(
+                "未找到评分模型权重：请按 README「模型资产」下载 "
+                "singing_scorer_v1.pt 到 models/ 目录后重试")
         if mert_path is None:
             local = ROOT / "models" / "MERT-v1-95M"
             mert_path = local if local.exists() else "m-a-p/MERT-v1-95M"
-        stats_path = stats_path or ROOT / "models" / "feat_stats.json"
-        stats = json.loads(Path(stats_path).read_text(encoding="utf-8"))
+        stats_path = Path(stats_path or ROOT / "models" / "feat_stats.json")
+        if not stats_path.exists():
+            raise RuntimeError(
+                f"未找到特征归一化统计 {stats_path}：请按 README「模型资产」"
+                "下载 feat_stats.json 到 models/ 目录")
+        stats = json.loads(stats_path.read_text(encoding="utf-8"))
         self.mean = {(g, k): v[0] for g, d in stats.items() for k, v in d.items()}
         self.std = {(g, k): v[1] for g, d in stats.items() for k, v in d.items()}
         group_dims = {"prosody": len(PROSODY_KEYS), "timbre": len(TIMBRE_KEYS),
                       "pref": len(PREF_KEYS), "dm": 68, "fame": 2}
         self.model = SingingAssessor(str(mert_path), group_dims)
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        except Exception:  # 旧版 torch 或 ckpt 含非张量对象时回退
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         self.model.load_state_dict(ckpt["model"])
         self.model.eval().to(self.device)
 

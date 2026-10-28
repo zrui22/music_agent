@@ -1,0 +1,12 @@
+# 测试最小依赖（CI 用）：门控/匹配/曲库/中转测试均为纯算法 + HTTP，无需 torch/transformers。
+# 说明：
+#   - matcher 的 numba 为可选加速（缺失时自动退回纯 Python DTW，测试照常通过）
+#   - parselmouth/imageio-ffmpeg 是 import 链所需（diagnose/reference 顶层引入），均为二进制 wheel
+numpy
+rapidfuzz
+praat-parselmouth
+imageio-ffmpeg
+fastapi
+python-multipart
+httpx
+pytest

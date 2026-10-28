@@ -113,12 +113,12 @@ def main():
     print("🎵 声乐教练「陪教」已上线。输入 /help 看命令，直接打字聊天。")
     try:
         from src.agent import llm_client
-        llm_ok = bool(llm_client._load_codex().get("CODEX_API_KEY")
+        llm_ok = bool(llm_client._load_openai().get("OPENAI_API_KEY")
                       or llm_client._load_anthropic().get("ANTHROPIC_API_KEY"))
     except Exception:
         llm_ok = False
     if not llm_ok:
-        print("（未配置 LLM 后端：只出分数表。配置 CODEX_* 或 ANTHROPIC_* 环境变量后可获得教练评语）")
+        print("（未配置 LLM 后端：只出分数表。配置 OPENAI_* 或 ANTHROPIC_* 环境变量后可获得教练评语）")
 
     print("加载评分模型...")
     scorer = Scorer()

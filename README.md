@@ -4,7 +4,12 @@
 
 **唱一段，AI 告诉你：音准差多少音分、哪句拖拍、气息稳不稳、该怎么练。**
 
-[功能](#-功能) • [安装](#-安装) • [快速开始](#-快速开始) • [输出说明](#-输出说明) • [模型与训练数据](#-模型与训练数据) • [模型资产](#-模型资产) • [FAQ](#-faq)
+[![CI](https://github.com/zrui22/music_agent/actions/workflows/ci.yml/badge.svg)](https://github.com/zrui22/music_agent/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Release](https://img.shields.io/github/v/release/zrui22/music_agent?display_name=tag)](https://github.com/zrui22/music_agent/releases)
+[![Stars](https://img.shields.io/github/stars/zrui22/music_agent?style=social)](https://github.com/zrui22/music_agent)
+
+[功能](#-功能) • [安装](#-安装) • [快速开始](#-快速开始) • [Docker](#-docker) • [输出说明](#-输出说明) • [模型与训练数据](#-模型与训练数据) • [模型资产](#-模型资产) • [测试](#-测试) • [FAQ](#-faq)
 
 </div>
 
@@ -49,6 +54,19 @@ PYTHONPATH=. python src/agent/diagnose.py 我唱的.wav --no-match
 # 结果写文件
 PYTHONPATH=. python src/agent/diagnose.py 我唱的.wav -o result.json
 ```
+
+## 🐳 Docker
+
+无需配环境，一条命令起完整服务（镜像默认 CPU 版 PyTorch，体积小）：
+
+```bash
+docker build -t peijiao .
+docker run -p 9527:9527 -v $PWD/models:/app/models -v $PWD/data:/app/data peijiao
+# 打开 http://localhost:9527
+```
+
+`models/` 与 `data/` 通过挂载注入（内容见[模型资产](#-模型资产)）；
+国内拉取 MERT 编码器慢时加 `-e HF_ENDPOINT=https://hf-mirror.com`。
 
 ## 💬 对话模式（教练「陪教」）
 
@@ -152,11 +170,12 @@ from src.agent.report import build_report
 report = build_report(diag_result)   # dict -> 总评/逐维点评/问题清单/练习计划
 ```
 
-需配置任一 LLM 后端（未配置时 `build_report` 会抛错，请自行 `try/except`）：
+需配置任一 LLM 后端（未配置时 `build_report` 会抛错，请自行 `try/except`）。
+环境变量优先，也可写在项目根目录 `.env` 文件中：
 
 ```bash
 # OpenAI 兼容接口
-export CODEX_BASE_URL=... CODEX_API_KEY=... CODEX_MODEL=...
+export OPENAI_BASE_URL=... OPENAI_API_KEY=... OPENAI_MODEL=...
 # 或 Anthropic 兼容
 export ANTHROPIC_BASE_URL=... ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=...
 ```
@@ -253,6 +272,23 @@ src/
 ├── pitchref/    # f0(音高提取) align(移调与对齐) netease(参考曲获取) song_id
 └── utils/       # 音频转码
 ```
+
+## ✅ 测试
+
+核心算法（歌声门控 / 哼唱检索 / 曲库读取 / LLM 中转）有纯算法级测试，
+**无需 GPU、无需模型权重**（约 2 秒跑完）：
+
+```bash
+pip install -r tests/requirements-test.txt
+PYTHONPATH=. python -m pytest tests/ -q
+```
+
+CI 在每次 push / PR 自动运行（Python 3.10 / 3.12 矩阵）。
+
+## 🤝 参与贡献
+
+欢迎 Issue 与 PR，请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+两条红线：**不要提交任何音频/歌词/权重文件**，**不要提交任何 API Key**。
 
 ## ❓ FAQ
 

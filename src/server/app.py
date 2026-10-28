@@ -18,6 +18,7 @@ import asyncio
 import collections
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -63,8 +64,12 @@ def health():
     n_lib = sum(1 for d in REF_DIR.iterdir()
                 if (d / "ref_f0.npz").exists()) if REF_DIR.exists() else 0
     import torch
+    weights = (ROOT / "models" / "singing_scorer_v1.pt").exists() \
+        or (ROOT / "runs" / "r3" / "best.pt").exists()
+    stats = (ROOT / "models" / "feat_stats.json").exists()
     return {"status": "ok", "version": app.version,
             "model_loaded": _scorer is not None,
+            "model_weights": weights and stats,
             "device": "cuda" if torch.cuda.is_available() else "cpu",
             "library_size": n_lib,
             "time": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -73,7 +78,7 @@ def health():
 @app.get("/api/library")
 def library(q: str = "", limit: int = 20):
     from src.agent import reference
-    items = reference.library()
+    items = reference.library(load_f0=False)   # 列表只需歌名/歌手，免 F0 加载
     if q:
         ql = q.lower()
         items = [it for it in items
@@ -86,24 +91,33 @@ def library(q: str = "", limit: int = 20):
 
 # ---------- 评测 ----------
 
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024   # 50MB
+
+
 @app.post("/api/diagnose")
 async def api_diagnose(file: UploadFile = File(...), song: str = Form(""),
                        auto_match: bool = Form(True), windows: int = Form(5)):
     from src.agent.diagnose import diagnose
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        return JSONResponse({"error": "文件超过 50MB 上限，请裁剪后再上传"}, 413)
     suffix = Path(file.filename or "audio").suffix or ".bin"
     tmp = Path(tempfile.mkdtemp(prefix="api_"))
-    src = tmp / f"input{suffix}"
-    src.write_bytes(await file.read())
-    async with _diag_sem:
-        loop = asyncio.get_running_loop()
-        try:
-            diag = await loop.run_in_executor(
-                None, lambda: diagnose(str(src), song=song or None,
-                                       auto_match=auto_match,
-                                       n_windows=windows, scorer=get_scorer()))
-        except Exception as e:
-            return JSONResponse({"error": f"{type(e).__name__}: {e}"}, 400)
-    return diag
+    try:
+        src = tmp / f"input{suffix}"
+        src.write_bytes(data)
+        async with _diag_sem:
+            loop = asyncio.get_running_loop()
+            try:
+                diag = await loop.run_in_executor(
+                    None, lambda: diagnose(str(src), song=song or None,
+                                           auto_match=auto_match,
+                                           n_windows=windows, scorer=get_scorer()))
+            except Exception as e:
+                return JSONResponse({"error": f"{type(e).__name__}: {e}"}, 400)
+        return diag
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------- LLM 无状态中转（仅用于绕过浏览器 CORS；Key 随请求转发，不存储、不记日志） ----------

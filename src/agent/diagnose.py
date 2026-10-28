@@ -6,11 +6,14 @@
 
 匹配优先级：--song 指定 > 哼唱库检索 > 免参考（仅网络分+发声特征）。
 """
+from __future__ import annotations
+
 import argparse
 import json
 import tempfile
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -21,7 +24,10 @@ from src.features.prosody import prosody_features
 from src.features.timbre import timbre_features
 from src.utils.audio import to_wav
 from src.agent import reference, matcher
-from src.agent.scorer import Scorer, SR
+from src.model.heads import SR
+
+if TYPE_CHECKING:
+    from src.agent.scorer import Scorer  # 重依赖（torch/MERT），仅类型注解用
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -99,10 +105,22 @@ def _segment_evidence(view, lrc: list, min_dur: float = 4.0) -> list:
 def diagnose(audio_path: str, song: str = None, auto_match: bool = True,
              n_windows: int = 5, scorer: Scorer = None,
              work_dir: str = None, singing_gate: bool = True) -> dict:
+    """work_dir 缺省时自建临时目录并在返回前清理；显式传入时由调用方管理。"""
+    if work_dir is not None:
+        tmp = Path(work_dir)
+        tmp.mkdir(parents=True, exist_ok=True)
+        return _diagnose_impl(audio_path, song, auto_match, n_windows,
+                              scorer, tmp, singing_gate)
+    with tempfile.TemporaryDirectory(prefix="agent_",
+                                     ignore_cleanup_errors=True) as td:
+        return _diagnose_impl(audio_path, song, auto_match, n_windows,
+                              scorer, Path(td), singing_gate)
+
+
+def _diagnose_impl(audio_path: str, song, auto_match: bool, n_windows: int,
+                   scorer: Scorer, tmp: Path, singing_gate: bool) -> dict:
     t_start = time.time()
     audio_path = Path(audio_path)
-    tmp = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="agent_"))
-    tmp.mkdir(parents=True, exist_ok=True)
     wav24 = tmp / f"{audio_path.stem}_24k.wav"
     if not to_wav(audio_path, wav24, sr=SR):
         raise RuntimeError(f"音频转换失败: {audio_path}")
@@ -182,7 +200,10 @@ def diagnose(audio_path: str, song: str = None, auto_match: bool = True,
             segments = _segment_evidence(view, ref.get("lrc") or [])
 
     # --- 网络主观分 ---
-    scorer = scorer or Scorer()
+    # --- 网络主观分（Scorer 懒加载：torch/MERT 只在真正评分时才引入） ---
+    if scorer is None:
+        from src.agent.scorer import Scorer
+        scorer = Scorer()
     net = scorer.score(wav, {"prosody": pro, "timbre": tbr, "pref": pref or None},
                        n_windows=n_windows)
 

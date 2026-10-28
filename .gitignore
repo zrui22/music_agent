@@ -24,6 +24,7 @@ logs/
 
 # 凭据（永不入库）
 .secrets/
+.env
 *.cookie
 cookies.txt
 

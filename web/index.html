@@ -373,7 +373,8 @@ let ttsAudio = null;
 async function speakText(text){
   if(!$('#ttsOn')?.checked) return;
   const clean = String(text).replace(/```[\s\S]*?```/g,'。').replace(/[*#`>\[\]]/g,'')
-    .replace(/^[-·]\s*/gm,'').replace(/\s+/g,' ').trim().slice(0,280);
+    .replace(/^[-·]\s*/gm,'').replace(/\s*\n+\s*/g,'。').replace(/[ \t]+/g,' ')
+    .replace(/。{2,}/g,'。').trim().replace(/^[。 ]+|[。 ]+$/g,'').slice(0,280);
   if(!clean) return;
   if('speechSynthesis' in window) speechSynthesis.cancel();
   if(ttsAudio){ try{ ttsAudio.pause(); }catch(e){} ttsAudio = null; window.avatarSpeaking = false; }
@@ -554,6 +555,7 @@ async function runDiagnose(blob, fname){
     }
     lastDiag = diag;
     renderEval(diag);
+    loadHealth();   // 首次评测后模型完成懒加载，徽标由「按需加载」转「就绪」
     if(diag.match && diag.match.song && diag.match.confidence>=0.5 && !curSong)
       setSong(diag.match.song);
     const ov = (diag.subjective||{}).overall;
@@ -816,7 +818,11 @@ $('#settings').addEventListener('click', e=>{ if(e.target.id==='settings') close
 async function loadHealth(){
   try{
     const h = await api('/api/health');
-    $('#bModel').className='badge ok';   $('#bModel').innerHTML='<span class="dot"></span>模型 就绪';
+    const bm = $('#bModel');
+    if(h.model_loaded){ bm.className='badge ok'; bm.innerHTML='<span class="dot"></span>模型 就绪'; }
+    else if(h.model_weights){ bm.className='badge ok'; bm.innerHTML='<span class="dot"></span>模型 按需加载'; }
+    else { bm.className='badge err'; bm.innerHTML='<span class="dot"></span>模型 缺权重'; 
+           toast('模型权重未下载，评测不可用：请按 README「模型资产」放置 models/singing_scorer_v1.pt', true); }
     refreshLLMBadge();
     $('#bLib').className='badge ok';     $('#bLib').innerHTML=`<span class="dot"></span>曲库 ${h.library_size} 首`;
   }catch(e){

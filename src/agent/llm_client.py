@@ -1,51 +1,45 @@
-"""LLM 客户端：双后端自动回落
+"""LLM 客户端：OpenAI / Anthropic 双协议，环境变量或项目根 .env 配置。
 
-后端优先级：
-  1. openai 协议（CODEX_BASE_URL/CODEX_API_KEY/CODEX_MODEL，或 ~/.kimi-code/secrets/codex-backend.env）
-  2. anthropic 协议（ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/ANTHROPIC_MODEL，
-     默认回落到 ~/.kimi-code/config.toml 的 maas-anthropic provider）
+配置方式（任选其一，环境变量优先）：
+  export OPENAI_BASE_URL=... OPENAI_API_KEY=... OPENAI_MODEL=...       # OpenAI 协议
+  export ANTHROPIC_BASE_URL=... ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=...  # Anthropic 协议
+或在项目根目录 .env 文件中写同名变量（KEY=VALUE，每行一个）。
+
+注意：Web 前端的「陪教」对话默认由浏览器直连 LLM（或经 /api/llm/relay 中转），
+本模块只服务于命令行模式 `python -m src.agent.chat`。
 """
 import json
 import os
 import re
 import urllib.request
+from pathlib import Path
 
-CODEX_ENV_FILE = os.path.expanduser("~/.kimi-code/secrets/codex-backend.env")
-KIMI_CFG = os.path.expanduser("~/.kimi-code/config.toml")
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
-def _load_codex() -> dict:
+def _env_file() -> dict:
     cfg = {}
-    if os.path.exists(CODEX_ENV_FILE):
-        for line in open(CODEX_ENV_FILE, encoding="utf-8"):
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
                 cfg[k.strip()] = v.strip().strip('"').strip("'")
-    for k in ("CODEX_BASE_URL", "CODEX_API_KEY", "CODEX_MODEL"):
-        if os.environ.get(k):
-            cfg[k] = os.environ[k]
-    return cfg
+    return {**cfg, **{k: v for k, v in os.environ.items() if v}}
+
+
+def _load_openai() -> dict:
+    env = _env_file()
+    return {"OPENAI_BASE_URL": env.get("OPENAI_BASE_URL"),
+            "OPENAI_API_KEY": env.get("OPENAI_API_KEY"),
+            "OPENAI_MODEL": env.get("OPENAI_MODEL")}
 
 
 def _load_anthropic() -> dict:
-    cfg = {"ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL"),
-           "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY"),
-           "ANTHROPIC_MODEL": os.environ.get("ANTHROPIC_MODEL", "kimi-k3")}
-    if not (cfg["ANTHROPIC_BASE_URL"] and cfg["ANTHROPIC_API_KEY"]):
-        # 从 kimi-code config.toml 提取 maas-anthropic provider（轻量正则解析，避免引 toml 依赖）
-        try:
-            text = open(KIMI_CFG, encoding="utf-8").read()
-            m = re.search(r'\[providers\.maas-anthropic\](.*?)(?:\n\[|\Z)', text, re.S)
-            block = m.group(1)
-            cfg["ANTHROPIC_BASE_URL"] = re.search(r'base_url\s*=\s*"([^"]+)"', block).group(1)
-            cfg["ANTHROPIC_API_KEY"] = re.search(r'api_key\s*=\s*"([^"]+)"', block).group(1)
-            mm = re.search(r'\[models\."([^"]+)"\]\s*\n\s*provider\s*=\s*"maas-anthropic"', text)
-            if mm and not os.environ.get("ANTHROPIC_MODEL"):
-                cfg["ANTHROPIC_MODEL"] = mm.group(1)
-        except Exception:
-            pass
-    return cfg
+    env = _env_file()
+    return {"ANTHROPIC_BASE_URL": env.get("ANTHROPIC_BASE_URL"),
+            "ANTHROPIC_API_KEY": env.get("ANTHROPIC_API_KEY"),
+            "ANTHROPIC_MODEL": env.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")}
 
 
 def _repair_truncated_json(text: str) -> str:
@@ -86,14 +80,14 @@ def extract_json(text: str):
 
 
 def _call_openai(cfg, system, user, model, max_tokens, temperature, timeout):
-    payload = {"model": model or cfg.get("CODEX_MODEL", "gpt-5.5"),
+    payload = {"model": model or cfg.get("OPENAI_MODEL", "gpt-4o-mini"),
                "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": user}],
                "temperature": temperature, "max_tokens": max_tokens}
     req = urllib.request.Request(
-        f"{cfg['CODEX_BASE_URL'].rstrip('/')}/chat/completions",
+        f"{cfg['OPENAI_BASE_URL'].rstrip('/')}/chat/completions",
         data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {cfg['CODEX_API_KEY']}",
+        headers={"Authorization": f"Bearer {cfg['OPENAI_API_KEY']}",
                  "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode())
@@ -103,7 +97,6 @@ def _call_openai(cfg, system, user, model, max_tokens, temperature, timeout):
 def _call_anthropic(cfg, system, user, model, max_tokens, temperature, timeout):
     payload = {"model": model or cfg["ANTHROPIC_MODEL"], "max_tokens": max_tokens,
                "system": system,
-               "thinking": {"type": "disabled"},  # 分类任务关思考链，提速数倍
                "messages": [{"role": "user", "content": user}]}
     req = urllib.request.Request(
         f"{cfg['ANTHROPIC_BASE_URL'].rstrip('/')}/v1/messages",
@@ -122,15 +115,14 @@ _PREFERRED_BACKEND = []  # 首个可用后端名缓存，避免每次先试失�
 
 def chat_json(system: str, user: str, model: str = None, max_tokens: int = 4096,
               temperature: float = 0.1, timeout: int = 180):
-    """调 LLM 并解析 JSON。openai 后端 401/失败时自动回落 anthropic 后端。"""
-    codex = _load_codex()
-    anth = _load_anthropic()
-    backends = [("openai", codex, _call_openai), ("anthropic", anth, _call_anthropic)]
+    """调 LLM 并解析 JSON。openai 后端失败时自动回落 anthropic 后端。"""
+    openai, anth = _load_openai(), _load_anthropic()
+    backends = [("openai", openai, _call_openai), ("anthropic", anth, _call_anthropic)]
     if _PREFERRED_BACKEND:
         backends.sort(key=lambda b: b[0] != _PREFERRED_BACKEND[0])
     errors = []
     for backend, cfg, caller in backends:
-        key = cfg.get("CODEX_API_KEY") if backend == "openai" else cfg.get("ANTHROPIC_API_KEY")
+        key = cfg.get("OPENAI_API_KEY") if backend == "openai" else cfg.get("ANTHROPIC_API_KEY")
         if not key:
             continue
         try:
@@ -149,12 +141,12 @@ def chat(messages: list, system: str = "", model: str = None, max_tokens: int = 
          temperature: float = 0.7, timeout: int = 120) -> str:
     """纯文本多轮对话。messages=[{"role","content"},...]，返回文本。无后端抛 RuntimeError。"""
     errors = []
-    for caller, kwargs in (
-        (_chat_openai, _load_codex()),
+    for caller, cfg in (
+        (_chat_openai, _load_openai()),
         (_chat_anthropic, _load_anthropic()),
     ):
         try:
-            return caller(kwargs, messages, system, model, max_tokens, temperature, timeout)
+            return caller(cfg, messages, system, model, max_tokens, temperature, timeout)
         except Exception as e:
             errors.append(f"{type(e).__name__} {str(e)[:100]}")
             continue
@@ -162,15 +154,15 @@ def chat(messages: list, system: str = "", model: str = None, max_tokens: int = 
 
 
 def _chat_openai(cfg, messages, system, model, max_tokens, temperature, timeout):
-    if not cfg.get("CODEX_API_KEY"):
+    if not cfg.get("OPENAI_API_KEY"):
         raise RuntimeError("no openai backend")
     msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
-    payload = {"model": model or cfg.get("CODEX_MODEL", "gpt-5.5"),
+    payload = {"model": model or cfg.get("OPENAI_MODEL", "gpt-4o-mini"),
                "messages": msgs, "temperature": temperature, "max_tokens": max_tokens}
     req = urllib.request.Request(
-        f"{cfg['CODEX_BASE_URL'].rstrip('/')}/chat/completions",
+        f"{cfg['OPENAI_BASE_URL'].rstrip('/')}/chat/completions",
         data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {cfg['CODEX_API_KEY']}",
+        headers={"Authorization": f"Bearer {cfg['OPENAI_API_KEY']}",
                  "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode())
@@ -182,7 +174,6 @@ def _chat_anthropic(cfg, messages, system, model, max_tokens, temperature, timeo
         raise RuntimeError("no anthropic backend")
     payload = {"model": model or cfg["ANTHROPIC_MODEL"], "max_tokens": max_tokens,
                "system": system or "你是声乐教练。",
-               "thinking": {"type": "disabled"},
                "messages": list(messages)}
     req = urllib.request.Request(
         f"{cfg['ANTHROPIC_BASE_URL'].rstrip('/')}/v1/messages",

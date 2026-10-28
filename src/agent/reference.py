@@ -162,11 +162,13 @@ def resolve_best_version(song: str, cover_f0, cover_dur_s: float = 0,
     return ref
 
 
-def library(require_cached_f0: bool = True) -> list:
+def library(require_cached_f0: bool = True, load_f0: bool = True) -> list:
     """枚举缓存曲库，供哼唱匹配。
 
     require_cached_f0=True：只收已有 ref_f0.npz 的参考（匹配侧要求快；
     全库 F0 预建用 scripts/build_ref_f0_cache.py 离线跑）。
+    load_f0=False：只读 meta.json、不加载 npz（歌名补全等列表场景，
+    避免每次请求对全库做数百 MB IO），返回项的 f0 字段为 None。
     """
     out = []
     if not REF_DIR.exists():
@@ -181,9 +183,12 @@ def library(require_cached_f0: bool = True) -> list:
             meta = json.loads(mp.read_text(encoding="utf-8"))
         except Exception:
             continue
-        f0 = ref_f0(d)
-        if f0 is None or f0[2].mean() < 0.15:
-            continue
+        if load_f0:
+            f0 = ref_f0(d)
+            if f0 is None or f0[2].mean() < 0.15:
+                continue
+        else:
+            f0 = None
         out.append({"dir": d, "song": meta.get("name"), "artists": meta.get("artists"),
                     "ref_id": meta.get("id"), "query": meta.get("query"), "f0": f0})
     return out
