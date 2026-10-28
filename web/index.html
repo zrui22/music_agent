@@ -197,7 +197,7 @@ canvas.radar{width:200px;height:200px}
         · 清唱 15 秒以上效果最好<br>
         · 指定歌名比自动匹配更可靠<br>
         · 音准/节奏是和原曲对齐算出的客观分；气息/音色/表现力是 AI 主观分<br>
-        · 教练评语由你自己配置的 LLM 生成：Key 存在本浏览器，直连服务商，不经过评测后端
+        · 教练评语由你自己配置的 LLM 生成：Key 存在本浏览器，请求经评测后端无状态中转（不落地、不记日志）；后端不在时才回退浏览器直连
       </div>
     </div>
   </aside>
@@ -210,7 +210,7 @@ canvas.radar{width:200px;height:200px}
     <label style="font-size:12px;color:var(--muted)">评测后端地址（留空 = 同源）</label>
     <input type="text" id="apiBaseInp" placeholder="http://服务器IP:8900">
     <div style="border-top:1px solid var(--line);margin:6px 0 14px"></div>
-    <div style="font-size:13px;color:var(--gold);margin-bottom:8px">🤖 LLM 教练评语（可选，Key 只存在本浏览器，直连服务商，不经过评测后端）</div>
+    <div style="font-size:13px;color:var(--gold);margin-bottom:8px">🤖 LLM 教练评语（可选，Key 只存在本浏览器；请求经评测后端无状态中转，不落地、不记日志，不受浏览器 CORS 限制）</div>
     <label style="font-size:12px;color:var(--muted)">协议</label>
     <select id="llmProto" onchange="updateLLMHint()" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 12px;color:var(--ink);margin:6px 0 10px">
       <option value="">不启用</option>
@@ -230,7 +230,7 @@ canvas.radar{width:200px;height:200px}
       <button class="cbtn" onclick="testLLM()" id="btnLLMTest">🔌 测试连接</button>
       <button class="cbtn primary" onclick="saveSettings()">保存</button>
     </div>
-    <div class="hint" style="margin-top:14px">后端接口：<code>GET /api/health</code> · <code>GET /api/library</code> · <code>POST /api/diagnose</code>（Swagger 文档 <code>{后端}/docs</code>）<br>⚠ LLM Key 仅存于浏览器 localStorage，若用公共电脑请记得回来清空。</div>
+    <div class="hint" style="margin-top:14px">后端接口：<code>GET /api/health</code> · <code>GET /api/library</code> · <code>POST /api/diagnose</code> · <code>POST /api/llm/relay</code>（Swagger 文档 <code>{后端}/docs</code>）<br>⚠ LLM Key 仅存于浏览器 localStorage，若用公共电脑请记得回来清空。</div>
   </div>
 </div>
 
@@ -268,7 +268,7 @@ let lastDiag = null;
 let history = [];   // LLM 对话历史
 const LABELS = {pitch:'音准',rhythm:'节奏',stability:'气息稳定',timbre:'音色',expression:'表现力',overall:'综合'};
 
-/* ================= LLM 浏览器直连（Key 只存本机，不经过评测后端） ================= */
+/* ================= LLM 调用（默认经评测后端无状态中转，Key 只存本机、后端不落地；后端不可达时回退浏览器直连） ================= */
 const PERSONA = `你是一位经验丰富、鼓励为主的声乐教练「陪教」。用户是业余唱歌爱好者。
 1. 回答声乐技巧、练声方法、选歌建议等问题，具体可执行，不空谈；
 2. 用户发来 [评测结果] JSON 时，翻译成通俗中文点评：先一句话总评，再逐维说问题（低于 3.5 的重点说），最后给 2-3 条本周练习建议；warnings 要如实转达；
@@ -291,11 +291,15 @@ function refreshLLMBadge(){
   else { b.className='badge warn'; b.innerHTML='<span class="dot"></span>LLM 未配置'; }
 }
 
-async function llmDirect(messages){
-  const c = llmCfg();
-  if(!llmReady()) throw new Error('LLM 未配置：点右上角「⚙ API」填写协议/入口/Key');
-  const system = PERSONA +
-    (curSong ? `\n\n[当前上下文]\n用户当前练习曲目：《${curSong}》` : '');
+function isCorsErr(e){ return /failed to fetch|networkerror|load failed/i.test(String(e && e.message || e)); }
+
+/* mode='direct' 浏览器直连；mode='relay' 走后端无状态中转（Key 随请求转发，不存储） */
+async function llmFetch(c, system, messages, mode){
+  if(mode === 'relay'){
+    const d = await api('/api/llm/relay', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({proto:c.proto, base:c.base, key:c.key, model:c.model, system, messages})});
+    return d.text;
+  }
   let url, headers, body;
   if(c.proto === 'openai'){
     url = c.base + '/chat/completions';
@@ -315,6 +319,33 @@ async function llmDirect(messages){
   if(!r.ok) throw new Error('LLM HTTP '+r.status+'：'+((d&&(d.error?.message||d.message))||'请求失败').slice(0,120));
   if(c.proto === 'openai') return d.choices[0].message.content;
   return (d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
+}
+
+async function llmChat(messages){
+  const c = llmCfg();
+  if(!llmReady()) throw new Error('LLM 未配置：点右上角「⚙ API」填写协议/入口/Key');
+  const system = PERSONA +
+    (curSong ? `\n\n[当前上下文]\n用户当前练习曲目：《${curSong}》` : '');
+  // 默认走后端无状态中转（Key 随请求转发，不落地）——不受浏览器 CORS 限制
+  try{
+    return await llmFetch(c, system, messages, 'relay');
+  }catch(e){
+    const msg = String(e && e.message || e);
+    // 中转已连通、上游返回的真实错误（鉴权失败 / 模型名错 / Base 错）：直接抛，不回退直连
+    if(/^(LLM HTTP|中转请求失败|上游响应)/.test(msg)) throw e;
+    // 中转路由本身不可达（后端离线 / 旧版后端无此路由）→ 回退浏览器直连
+    try{
+      const text = await llmFetch(c, system, messages, 'direct');
+      if(!window._directNotified){
+        window._directNotified = true;
+        toast('评测后端中转不可达，已回退为浏览器直连 LLM');
+      }
+      return text;
+    }catch(e2){
+      if(isCorsErr(e2)) throw new Error('后端中转不可达，且浏览器直连被 CORS 拦截：请确认评测后端已启动，或换支持浏览器直连的 LLM 端点');
+      throw e2;
+    }
+  }
 }
 
 function setSong(s){
@@ -520,7 +551,7 @@ async function coachReview(diag){
   window.avatarAPI?.state('thinking');
   const content = '[评测结果] '+JSON.stringify(diag, (k,v)=>k==='segments'?undefined:v);
   try{
-    const reply = await llmDirect([...history.slice(-8), {role:'user',content}]);
+    const reply = await llmChat([...history.slice(-8), {role:'user',content}]);
     typing.remove();
     history.push({role:'user',content:'（提交了一次演唱评测）'},{role:'assistant',content:reply});
     addMsg('coach', mdLite(reply));
@@ -542,7 +573,7 @@ async function sendChat(text){
   const typing = addTyping();
   history.push({role:'user', content:text});
   try{
-    const reply = await llmDirect(history.slice(-12));
+    const reply = await llmChat(history.slice(-12));
     typing.remove();
     history.push({role:'assistant', content:reply});
     addMsg('coach', mdLite(reply));
@@ -633,7 +664,7 @@ $('#songInp').addEventListener('input', e=>{
 const LLM_HINTS = {
   '': '不启用 LLM 时，评测功能不受影响，仅没有教练文字点评。',
   openai: 'OpenAI 官方填 <code>https://api.openai.com/v1</code>；DeepSeek / 通义千问 / 月之暗面 / vLLM / Ollama 等「OpenAI 兼容」服务也选这项，填它们给的 Base URL（一般到 /v1 为止）。',
-  anthropic: 'Claude 官方填 <code>https://api.anthropic.com</code>；阿里云 MaaS 等 Anthropic 兼容端点，填到 <code>…/apps/anthropic</code> 为止（<b>不要</b>带 /v1）。',
+  anthropic: 'Claude 官方填 <code>https://api.anthropic.com</code>；阿里云 MaaS 等 Anthropic 兼容端点，填到 <code>…/apps/anthropic</code> 为止（<b>不要</b>带 /v1），模型名按 MaaS 控制台开通的填（填错会报 Model not exist）。请求默认经评测后端无状态中转，不受浏览器 CORS 限制。',
 };
 function updateLLMHint(){
   const el = $('#llmHint'); if(!el) return;
@@ -658,7 +689,7 @@ function saveSettings(silent=false){
   refreshLLMBadge();
   if(!silent){ closeSettings(); toast('已保存'); loadHealth(); }
 }
-/* 测试连接：成功才写 llm_verified，徽标变「已连接」 */
+/* 测试连接：先测后端无状态中转（默认路径），后端不可达才试浏览器直连；成功才写 llm_verified，徽标变「已连接」 */
 async function testLLM(){
   const res = $('#llmTestRes'), btn = $('#btnLLMTest');
   const proto = $('#llmProto').value, base = $('#llmBase').value.trim().replace(/\/+$/,''),
@@ -666,21 +697,48 @@ async function testLLM(){
   const say = (html, ok) => { res.style.color = ok ? 'var(--teal)' : 'var(--red)'; res.innerHTML = html; };
   if(!proto){ say('先在上方选择协议（OpenAI 兼容 / Anthropic 兼容）'); return; }
   if(!base || !key){ say('Base URL 和 API Key 都要填'); return; }
-  btn.disabled = true; btn.textContent = '测试中…'; say('正在连接…', true);
+  btn.disabled = true; btn.textContent = '测试中…';
   const t0 = performance.now();
-  let url, headers, body;
-  if(proto === 'openai'){
-    url = base + '/chat/completions';
-    headers = {'Content-Type':'application/json', 'Authorization':'Bearer '+key};
-    body = {model: model||'gpt-4o-mini', max_tokens:1, messages:[{role:'user',content:'ping'}]};
-  }else{
-    url = base + '/v1/messages';
-    headers = {'Content-Type':'application/json', 'x-api-key':key,
-               'anthropic-version':'2023-06-01',
-               'anthropic-dangerous-direct-browser-access':'true'};
-    body = {model: model||'claude-sonnet-4-5', max_tokens:16, messages:[{role:'user',content:'ping'}]};
-  }
+  const pass = (via) => {
+    const ms = Math.round(performance.now()-t0);
+    saveSettings(true);
+    localStorage.setItem('llm_verified', cfgHash());
+    refreshLLMBadge();
+    say('✓ 连接成功（'+via+'，'+ms+'ms），配置已保存', true);
+    toast('LLM 连接测试通过');
+  };
   try{
+    // 1) 默认路径：后端无状态中转（不受浏览器 CORS 限制）
+    say('正在经后端中转连接…', true);
+    try{
+      await api('/api/llm/relay', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({proto, base, key, model, system:'ping',
+                              messages:[{role:'user',content:'ping'}]})});
+      pass('后端中转');
+      return;
+    }catch(e){
+      const msg = String(e && e.message || e);
+      // 中转管道通、上游返回真实错误（Key 错 / 模型名错 / Base 错）——这就是最终结论，不再试直连
+      if(/^(LLM HTTP|中转请求失败|上游响应)/.test(msg)){
+        say('✗ 连接失败：'+esc(msg.slice(0,160)));
+        return;
+      }
+      // 中转路由本身不可达（后端离线 / 旧版后端）→ 2) 回退浏览器直连
+      say('后端中转不可达，尝试浏览器直连…', true);
+    }
+    // 2) 回退路径：浏览器直连（要求服务商放行 CORS）
+    let url, headers, body;
+    if(proto === 'openai'){
+      url = base + '/chat/completions';
+      headers = {'Content-Type':'application/json', 'Authorization':'Bearer '+key};
+      body = {model: model||'gpt-4o-mini', max_tokens:1, messages:[{role:'user',content:'ping'}]};
+    }else{
+      url = base + '/v1/messages';
+      headers = {'Content-Type':'application/json', 'x-api-key':key,
+                 'anthropic-version':'2023-06-01',
+                 'anthropic-dangerous-direct-browser-access':'true'};
+      body = {model: model||'claude-sonnet-4-5', max_tokens:16, messages:[{role:'user',content:'ping'}]};
+    }
     const r = await fetch(url, {method:'POST', headers, body:JSON.stringify(body)});
     const d = await r.json().catch(()=>null);
     if(!r.ok){
@@ -688,18 +746,13 @@ async function testLLM(){
       say('✗ 连接失败（HTTP '+r.status+'）：'+esc(String(msg).slice(0,140)));
       return;
     }
-    const ms = Math.round(performance.now()-t0);
-    saveSettings(true);
-    localStorage.setItem('llm_verified', cfgHash());
-    refreshLLMBadge();
-    say('✓ 连接成功（'+ms+'ms），配置已保存');
-    toast('LLM 连接测试通过');
+    pass('浏览器直连');
   }catch(e){
-    // TypeError: Failed to fetch = 网络不通或被 CORS 拦截
-    const cors = /failed to fetch|networkerror|load failed/i.test(String(e && e.message || e));
-    say('✗ ' + (cors
-      ? '请求被拦截（多为该服务商未放行浏览器跨域 CORS）。可换支持浏览器直连的端点，或自建一层本地转发代理。'
-      : '连接异常：'+esc(String(e && e.message || e).slice(0,140))));
+    if(isCorsErr(e)){
+      say('✗ 后端中转不可达，浏览器直连又被 CORS 拦截：请先启动评测后端（python -m src.server.app），或换支持浏览器直连的端点');
+    }else{
+      say('✗ 连接异常：'+esc(String(e && e.message || e).slice(0,140)));
+    }
   }finally{
     btn.disabled = false; btn.textContent = '🔌 测试连接';
   }
@@ -760,20 +813,7 @@ try {
     try { VRMUtils.removeUnnecessaryVertices(gltf.scene); VRMUtils.combineSkeletons(gltf.scene); } catch(e) {}
     if (String(vrm.meta?.metaVersion || '0') === '0') VRMUtils.rotateVRM0(vrm);
     scene.add(vrm.scene);
-    /* 头肩胸取景：用头部骨骼定位（包围盒会被头发/裙摆撑大，导致人显小、偏移） */
     vrm.scene.updateMatrixWorld(true);
-    let headBone = null;
-    try { headBone = vrm.humanoid.getBoneNode('head'); } catch(e) {}
-    if (headBone){
-      const hp = headBone.getWorldPosition(new THREE.Vector3());
-      camera.position.set(hp.x, hp.y + 0.03, hp.z + 1.02);
-      camera.lookAt(hp.x, hp.y - 0.16, hp.z);
-    } else {
-      const box = new THREE.Box3().setFromObject(vrm.scene);
-      const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
-      camera.position.set(ctr.x, box.max.y - size.y * 0.16, ctr.z + size.y * 0.72);
-      camera.lookAt(ctr.x, box.max.y - size.y * 0.22, ctr.z);
-    }
     startAnim(vrm, renderer, scene, camera);
     setStatus('待命中 — 唱一段给我听吧');
   }, undefined, err => { console.warn('VRM 加载失败', err); setStatus('3D 形象加载失败（不影响评测）'); });
@@ -790,16 +830,43 @@ function startAnim(vrm, renderer, scene, camera){
     relaxed: firstOf(['relaxed', 'fun']), surprised: firstOf(['surprised']),
     mouth: firstOf(['aa', 'a']), blink: firstOf(['blink']),
   };
-  const bone = n => { try { return vrm.humanoid.getBoneNode(n); } catch(e) { return null; } };
+  /* 归一化骨骼：rest 为单位阵、轴向=模型加载帧（Alicia 0.x 加载帧面朝 -Z、左手 -X）。
+     raw 骨骼轴向因模型而异，不可直接假设 —— getBoneNode 已废弃且返回 raw。 */
+  const bone = n => {
+    try { return vrm.humanoid.getNormalizedBoneNode(n) || vrm.humanoid.getRawBoneNode(n); }
+    catch(e) { try { return vrm.humanoid.getRawBoneNode(n); } catch(e2) { return null; } }
+  };
   const head = bone('head'), neck = bone('neck'), chest = bone('chest') || bone('upperChest');
+  const uArmL = bone('leftUpperArm'), uArmR = bone('rightUpperArm');
+  const lArmL = bone('leftLowerArm'), lArmR = bone('rightLowerArm');
+
+  /* 站姿：模型文件存的是 T-pose（双臂水平伸直），把双臂放下。
+     加载帧轴向：+X=角色右手侧, +Y=上, +Z=角色背后（面朝 -Z）。
+     左臂伸向 -X：绕 Z 正角放下；右臂伸向 +X：绕 Z 负角放下；Y 微转让手臂略向前垂。 */
+  if (uArmL){ uArmL.rotation.z =  1.08; uArmL.rotation.y = -0.10; }
+  if (uArmR){ uArmR.rotation.z = -1.08; uArmR.rotation.y =  0.10; }
+  if (lArmL) lArmL.rotation.z =  0.12;
+  if (lArmR) lArmR.rotation.z = -0.12;
+
+  /* 头肩胸取景：头部骨骼定位，距离 1.6m 拍胸像（包围盒会被头发撑大导致偏移） */
+  if (head){
+    const hp = head.getWorldPosition(new THREE.Vector3());
+    camera.position.set(hp.x, hp.y + 0.02, hp.z + 1.6);
+    camera.lookAt(hp.x, hp.y - 0.15, hp.z);
+  } else {
+    const box = new THREE.Box3().setFromObject(vrm.scene);
+    const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+    camera.position.set(ctr.x, box.max.y - size.y * 0.18, ctr.z + size.y * 1.05);
+    camera.lookAt(ctr.x, box.max.y - size.y * 0.24, ctr.z);
+  }
 
   /* ---- 姿态状态机：待命 idle / 聆听 listening / 思考 thinking / 说话 speaking ----
-     每个状态给头/颈/胸的目标角度，每帧向目标平滑插值；speaking 由 TTS 自动切入 */
+     加载帧轴向：X 负=低头/前倾，X 正=仰头；Y=转头；Z=侧头。每帧平滑插值到目标姿态 */
   const POSES = {
     idle:      { headX: 0.00, headY: 0.00, headZ: 0.00, chestX: 0.00, sway: 1.0 },
-    listening: { headX: 0.07, headY: 0.00, headZ: 0.10, chestX: 0.09, sway: 0.4 },  // 前倾+微侧头，专注听
-    thinking:  { headX: -0.10, headY: 0.18, headZ: 0.00, chestX: -0.02, sway: 1.6 }, // 微仰头+缓慢转头
-    speaking:  { headX: 0.02, headY: 0.00, headZ: 0.00, chestX: 0.03, sway: 0.8 },  // 叠加点头
+    listening: { headX: -0.06, headY: 0.00, headZ: 0.10, chestX: -0.09, sway: 0.4 },  // 前倾+微低头侧头，专注听
+    thinking:  { headX: 0.10, headY: 0.18, headZ: 0.00, chestX: 0.02, sway: 1.6 },   // 微仰头+缓慢转头
+    speaking:  { headX: -0.02, headY: 0.00, headZ: 0.00, chestX: -0.03, sway: 0.8 }, // 叠加点头
   };
   let poseName = 'idle';
   const cur = { ...POSES.idle };
@@ -847,12 +914,12 @@ function startAnim(vrm, renderer, scene, camera){
     if (head){
       if (now < shakeUntil){          // confused：摇头
         head.rotation.y = 0.22 * Math.sin(t * 9);
-        head.rotation.x = 0.05;
+        head.rotation.x = -0.05;
       } else {
         head.rotation.y = cur.headY + 0.06 * cur.sway * Math.sin(t * 0.45);
         head.rotation.x = cur.headX + 0.03 * cur.sway * Math.sin(t * 0.8);
-        if (speaking) head.rotation.x += 0.035 * Math.sin(t * 2.3);   // 说话点头
-        if (now < nodUntil) head.rotation.x += 0.09 * Math.abs(Math.sin(t * 5)); // 高分：开心点头
+        if (speaking) head.rotation.x += -0.045 * Math.max(0, Math.sin(t * 2.6));   // 说话点头（向下脉冲）
+        if (now < nodUntil) head.rotation.x += -0.10 * Math.abs(Math.sin(t * 5));   // 高分：开心点头
       }
       head.rotation.z = cur.headZ;
     }

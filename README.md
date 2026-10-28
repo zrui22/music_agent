@@ -84,14 +84,18 @@ PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 8900
 | `GET /api/health` | 模型/设备/曲库状态 |
 | `GET /api/library?q=` | 参考曲库检索（歌名补全） |
 | `POST /api/diagnose` | multipart 上传音频评测（可带 `song` / `auto_match`），内置歌声门控 |
+| `POST /api/llm/relay` | LLM 无状态中转（前端默认经它转发 LLM 请求，Key 不落地） |
 
 **歌声门控**：`/api/diagnose` 先判断"有没有唱"（响度 / F0 发声占比 / 最长持续音
 三个轻量信号），空录音、纯噪声、说话会直接返回 `{"singing": false, "message": …}`
 而不会误匹配、误评分。调试时可用 CLI 的 `--no-gate` 跳过。
 
-**LLM 评语不在后端**：评测后端零 LLM 依赖、不接触任何 Key。教练对话/评语由
-前端浏览器直连 LLM 服务商——在网页「⚙ 设置」里自填协议（OpenAI/Anthropic 兼容）、
-Base URL、API Key、模型名，凭据只存本浏览器 localStorage。
+**LLM 评语前端配置、后端无状态中转**：评测后端零 LLM 依赖、不存储任何 Key。在网页
+「⚙ 设置」里自填协议（OpenAI/Anthropic 兼容）、Base URL、API Key、模型名，凭据只存
+本浏览器 localStorage，「🔌 测试连接」通过后才算配置完成。请求默认经 `/api/llm/relay`
+无状态中转转发（Key 随请求转发、不落地、不记日志；只放行 `https://` 目标或本机回环
+http），因此不受浏览器跨域（CORS）限制，阿里云 MaaS 等不放行浏览器直连的端点也能用；
+评测后端不可达时（例如网页脱离服务器单独分发），前端自动回退浏览器直连。
 
 前端是纯静态单页（`web/index.html`，JS 库全部本地 vendor、无 CDN 依赖），默认调同源 API；
 在「⚙ 设置」里可改成任意后端地址，网页可脱离服务器单独分发。
@@ -134,7 +138,7 @@ Base URL、API Key、模型名，凭据只存本浏览器 localStorage。
 
 ### LLM 导师评语（可选）
 
-> Web 前端无需此配置（在网页「⚙ 设置」里填 Key，浏览器直连）。
+> Web 前端无需此配置（在网页「⚙ 设置」里填 Key，请求经后端无状态中转转发）。
 > 以下为 Python API / CLI `chat.py` 的本机配置方式。
 
 ```python

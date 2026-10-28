@@ -7,9 +7,10 @@ API：
     GET  /api/health     服务状态（模型/设备/曲库规模）
     GET  /api/library    参考曲库列表，?q= 过滤（歌名补全）
     POST /api/diagnose   multipart: file=音频, song?=歌名, auto_match?=bool -> 完整评测 JSON
+    POST /api/llm/relay  可选的 LLM 无状态中转（仅当浏览器直连被 CORS 拦截时使用）
     GET  /               前端单页（web/index.html）
-LLM 评语/对话不在后端：前端持有用户自填的 API Key，浏览器直连 LLM 服务商，
-本服务不接触、不转发、不存储任何 LLM 凭据。
+LLM 评语/对话默认由前端持有用户自填的 API Key 直连服务商，本服务不存储任何 LLM 凭据；
+/api/llm/relay 仅为绕过浏览器 CORS 的无状态转发——Key 随请求来、随响应走，不落盘、不记日志。
 交互式 API 文档：/docs（Swagger UI）
 """
 import asyncio
@@ -18,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -99,6 +100,65 @@ async def api_diagnose(file: UploadFile = File(...), song: str = Form(""),
         except Exception as e:
             return JSONResponse({"error": f"{type(e).__name__}: {e}"}, 400)
     return diag
+
+
+# ---------- LLM 无状态中转（仅用于绕过浏览器 CORS；Key 随请求转发，不存储、不记日志） ----------
+
+@app.post("/api/llm/relay")
+async def llm_relay(req: Request):
+    import httpx
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"error": "请求体不是 JSON"}, 400)
+    proto = str(body.get("proto") or "")
+    base = str(body.get("base") or "").rstrip("/")
+    key = str(body.get("key") or "")
+    model = str(body.get("model") or "")
+    messages = body.get("messages") or []
+    system = str(body.get("system") or "")
+    if proto not in ("openai", "anthropic"):
+        return JSONResponse({"error": "proto 必须是 openai / anthropic"}, 400)
+    if not base or not key:
+        return JSONResponse({"error": "缺少 base / key"}, 400)
+    if not isinstance(messages, list) or len(messages) > 40:
+        return JSONResponse({"error": "messages 不合法"}, 400)
+    # SSRF 防护：只允许 https://，或本机回环 http://（本地 vLLM/Ollama 场景）
+    low = base.lower()
+    if not (low.startswith("https://") or low.startswith("http://127.")
+            or low.startswith("http://localhost")):
+        return JSONResponse({"error": "base 仅允许 https://（或本机 http://127.x / localhost）"}, 400)
+    if proto == "openai":
+        url = base + "/chat/completions"
+        headers = {"Authorization": "Bearer " + key}
+        payload = {"model": model or "gpt-4o-mini", "temperature": 0.7, "max_tokens": 2048,
+                   "messages": ([{"role": "system", "content": system}] if system else []) + messages}
+    else:
+        url = base + "/v1/messages"
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        payload = {"model": model or "claude-sonnet-4-5", "max_tokens": 2048,
+                   "system": system, "messages": messages}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as cli:
+            r = await cli.post(url, json=payload, headers=headers)
+    except Exception as e:
+        return JSONResponse({"error": f"中转请求失败: {type(e).__name__}: {e}"}, 502)
+    try:
+        d = r.json()
+    except Exception:
+        return JSONResponse({"error": f"上游响应非 JSON（HTTP {r.status_code}）"}, 502)
+    if r.status_code >= 400:
+        msg = ""
+        if isinstance(d, dict):
+            err = d.get("error") or {}
+            msg = str(err.get("message") or d.get("message") or "")[:200]
+        return JSONResponse({"error": f"LLM HTTP {r.status_code}：{msg}"}, 502)
+    if proto == "openai":
+        text = ((d.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+    else:
+        text = "".join(b.get("text", "") for b in d.get("content", [])
+                       if isinstance(b, dict) and b.get("type") == "text")
+    return {"text": text}
 
 
 # ---------- 前端 ----------
