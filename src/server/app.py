@@ -142,9 +142,22 @@ async def llm_relay(req: Request):
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
         payload = {"model": model or "claude-sonnet-4-5", "max_tokens": 4096,
                    "system": system, "messages": messages}
+    # 默认关闭思考模式（qwen3 等混合模型默认开思考，慢且容易烧光 max_tokens 返回空）。
+    # 标准 Anthropic/OpenAI 默认本就不开思考，故只对已知默认开思考的阿里云百炼/MaaS 注入；
+    # 若上游 400 报 thinking 参数不认识，自动去掉该参数重试一次。
+    is_bailian = ("aliyuncs.com" in low) or ("dashscope" in low)
+    if is_bailian:
+        if proto == "openai":
+            payload["enable_thinking"] = False
+        else:
+            payload["thinking"] = {"type": "disabled"}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as cli:
             r = await cli.post(url, json=payload, headers=headers)
+            if r.status_code == 400 and is_bailian and "thinking" in r.text.lower():
+                payload.pop("enable_thinking", None)
+                payload.pop("thinking", None)
+                r = await cli.post(url, json=payload, headers=headers)
     except Exception as e:
         return JSONResponse({"error": f"中转请求失败: {type(e).__name__}: {e}"}, 502)
     try:
@@ -158,10 +171,19 @@ async def llm_relay(req: Request):
             msg = str(err.get("message") or d.get("message") or "")[:200]
         return JSONResponse({"error": f"LLM HTTP {r.status_code}：{msg}"}, 502)
     if proto == "openai":
-        text = ((d.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        ch = (d.get("choices") or [{}])[0]
+        text = (ch.get("message") or {}).get("content", "")
+        finish = str(ch.get("finish_reason") or "")
     else:
         text = "".join(b.get("text", "") for b in d.get("content", [])
                        if isinstance(b, dict) and b.get("type") == "text")
+        finish = str(d.get("stop_reason") or "")
+    # 后台直接判定空内容为错误（不再让前端收到空 text 渲染空气泡）
+    if not str(text).strip():
+        tip = ("输出达到长度上限被截断" if finish in ("max_tokens", "length")
+               else "模型名可能不正确或无权限")
+        return JSONResponse(
+            {"error": f"上游响应空内容（HTTP {r.status_code}，stop={finish or '?'}）：{tip}"}, 502)
     return {"text": text}
 
 
