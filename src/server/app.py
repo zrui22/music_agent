@@ -16,6 +16,7 @@ LLM 评语/对话默认由前端持有用户自填的 API Key 直连服务商，
 """
 import asyncio
 import collections
+import os
 import re
 import tempfile
 import threading
@@ -164,10 +165,24 @@ async def llm_relay(req: Request):
     return {"text": text}
 
 
-# ---------- TTS（edge-tts 在线语音，免费无 Key；失败时前端回退浏览器 TTS） ----------
+# ---------- TTS（默认本地 CosyVoice2 克隆声线 sidecar；edge-tts 在线兜底；再失败前端回退浏览器 TTS） ----------
 
-_TTS_CACHE = collections.OrderedDict()   # (voice, pitch, rate, text) -> mp3 bytes，上限 32 条
+_TTS_CACHE = collections.OrderedDict()   # (voice, pitch, rate, text) -> (mime, bytes)，上限 32 条
 _TTS_VOICE = re.compile(r"^zh-CN-[A-Za-z]+Neural$")
+_TTS_SIDECAR = os.environ.get("TTS_SIDECAR_URL", "http://127.0.0.1:9555")
+
+
+async def _sidecar_tts(text: str):
+    """调用本地 CosyVoice2 sidecar；不可用/超时返回 None。"""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=3.0)) as cli:
+            r = await cli.post(f"{_TTS_SIDECAR}/synthesize", json={"text": text})
+        if r.status_code == 200 and r.content:
+            return bytes(r.content)
+    except Exception:
+        pass
+    return None
 
 
 @app.post("/api/tts")
@@ -180,6 +195,19 @@ async def api_tts(req: Request):
     if not text:
         return JSONResponse({"error": "text 为空"}, 400)
     voice = str(body.get("voice") or "")
+    if voice == "paimon":
+        key = ("paimon", "", "", text)
+        if key in _TTS_CACHE:
+            _TTS_CACHE.move_to_end(key)
+            mime, data = _TTS_CACHE[key]
+            return Response(content=data, media_type=mime)
+        data = await _sidecar_tts(text)
+        if data:
+            _TTS_CACHE[key] = ("audio/wav", data)
+            if len(_TTS_CACHE) > 32:
+                _TTS_CACHE.popitem(last=False)
+            return Response(content=data, media_type="audio/wav")
+        voice = "zh-CN-XiaoyiNeural"   # sidecar 不在线 → 落到在线兜底
     if not _TTS_VOICE.fullmatch(voice):
         voice = "zh-CN-XiaoyiNeural"
     pitch = str(body.get("pitch") or "")
@@ -191,7 +219,8 @@ async def api_tts(req: Request):
     key = (voice, pitch, rate, text)
     if key in _TTS_CACHE:
         _TTS_CACHE.move_to_end(key)
-        return Response(content=_TTS_CACHE[key], media_type="audio/mpeg")
+        mime, data = _TTS_CACHE[key]
+        return Response(content=data, media_type=mime)
     try:
         import edge_tts
         comm = edge_tts.Communicate(text, voice=voice, rate=rate, pitch=pitch)
@@ -204,7 +233,7 @@ async def api_tts(req: Request):
     if not buf:
         return JSONResponse({"error": "TTS 无音频输出"}, 502)
     data = bytes(buf)
-    _TTS_CACHE[key] = data
+    _TTS_CACHE[key] = ("audio/mpeg", data)
     if len(_TTS_CACHE) > 32:
         _TTS_CACHE.popitem(last=False)
     return Response(content=data, media_type="audio/mpeg")

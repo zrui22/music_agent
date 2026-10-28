@@ -191,9 +191,10 @@ canvas.radar{width:200px;height:200px}
       <div id="avatarStatus" style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center">形象加载中…</div>
       <div class="switch"><input type="checkbox" id="ttsOn" checked><label for="ttsOn">语音朗读点评</label></div>
       <select id="ttsVoice" style="width:100%;margin-top:8px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--ink);font-size:13px;outline:none">
-        <option value="zh-CN-XiaoyiNeural">🎀 元气少女（小艺）</option>
-        <option value="zh-CN-YunxiaNeural">🧸 奶萌童声（云夏）</option>
-        <option value="zh-CN-XiaoxiaoNeural">🌸 温柔姐姐（晓晓）</option>
+        <option value="paimon">🍀 派蒙（本地克隆·推荐）</option>
+        <option value="zh-CN-XiaoyiNeural">🎀 元气少女（小艺·在线备用）</option>
+        <option value="zh-CN-YunxiaNeural">🧸 奶萌童声（云夏·在线备用）</option>
+        <option value="zh-CN-XiaoxiaoNeural">🌸 温柔姐姐（晓晓·在线备用）</option>
       </select>
     </div>
     <div class="card">
@@ -374,7 +375,7 @@ async function speakText(text){
   if(ttsAudio){ try{ ttsAudio.pause(); }catch(e){} ttsAudio = null; window.avatarSpeaking = false; }
   // 首选：后端 edge-tts（微软在线声线，无 Key），与 3D 形象适配的少女音
   try{
-    const voice = localStorage.getItem('ttsVoice') || 'zh-CN-XiaoyiNeural';
+    const voice = localStorage.getItem('ttsVoice') || 'paimon';
     const r = await fetch(apiBase()+'/api/tts', {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:clean, voice})});
     if(!r.ok) throw new Error('tts '+r.status);
@@ -686,7 +687,7 @@ $('#songInp').addEventListener('input', e=>{
 {
   const vs = $('#ttsVoice');
   if(vs){
-    vs.value = localStorage.getItem('ttsVoice') || 'zh-CN-XiaoyiNeural';
+    vs.value = localStorage.getItem('ttsVoice') || 'paimon';
     vs.addEventListener('change', ()=> localStorage.setItem('ttsVoice', vs.value));
   }
 }

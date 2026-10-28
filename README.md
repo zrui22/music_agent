@@ -85,7 +85,7 @@ PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 9527
 | `GET /api/library?q=` | 参考曲库检索（歌名补全） |
 | `POST /api/diagnose` | multipart 上传音频评测（可带 `song` / `auto_match`），内置歌声门控 |
 | `POST /api/llm/relay` | LLM 无状态中转（前端默认经它转发 LLM 请求，Key 不落地） |
-| `POST /api/tts` | 语音合成（edge-tts 在线声线，免费无 Key；前端可选声线，失败自动回退浏览器 TTS） |
+| `POST /api/tts` | 语音合成三级回退：本地克隆声线 sidecar（可选）→ edge-tts 在线声线 → 浏览器 TTS |
 
 **歌声门控**：`/api/diagnose` 先判断"有没有唱"（响度 / F0 发声占比 / 最长持续音
 三个轻量信号），空录音、纯噪声、说话会直接返回 `{"singing": false, "message": …}`
@@ -102,8 +102,13 @@ http），因此不受浏览器跨域（CORS）限制，阿里云 MaaS 等不放
 在「⚙ 设置」里可改成任意后端地址，网页可脱离服务器单独分发。
 内置 3D 教练形象（three.js + VRM，模型在 `web/assets/avatar.vrm`，
 为 VRM 官方示例模型 Alicia Solid）：评测时会根据分数做出表情反馈，
-朗读点评时口型同步（浏览器内置 TTS，可在侧栏关闭）；录音停止后先试听、
-确认发送或丢弃重录。
+朗读点评时口型同步（语音三级回退：本地克隆声线 → edge-tts → 浏览器 TTS，
+可在侧栏选择与关闭）；录音停止后先试听、确认发送或丢弃重录。
+
+**本地克隆声线（可选）**：想要更有亲和力的专属声线，可自建 CosyVoice2 sidecar
+（不随本仓库分发）：本地起任意兼容 `POST {url}/synthesize {"text":…} → audio/wav`
+的 TTS 服务，然后用环境变量 `TTS_SIDECAR_URL`（默认 `http://127.0.0.1:9555`）
+指给后端即可；sidecar 不在线时自动回退在线声线，无感切换。
 
 ## 📊 输出说明
 
