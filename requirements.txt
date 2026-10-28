@@ -6,3 +6,4 @@ praat-parselmouth
 rapidfuzz
 numba
 imageio-ffmpeg
+sounddevice

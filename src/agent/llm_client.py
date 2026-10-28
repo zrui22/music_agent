@@ -143,3 +143,54 @@ def chat_json(system: str, user: str, model: str = None, max_tokens: int = 4096,
             errors.append(f"{backend}: {type(e).__name__} {str(e)[:100]}")
             continue
     raise RuntimeError("所有LLM后端失败 | " + " | ".join(errors))
+
+
+def chat(messages: list, system: str = "", model: str = None, max_tokens: int = 2048,
+         temperature: float = 0.7, timeout: int = 120) -> str:
+    """纯文本多轮对话。messages=[{"role","content"},...]，返回文本。无后端抛 RuntimeError。"""
+    errors = []
+    for caller, kwargs in (
+        (_chat_openai, _load_codex()),
+        (_chat_anthropic, _load_anthropic()),
+    ):
+        try:
+            return caller(kwargs, messages, system, model, max_tokens, temperature, timeout)
+        except Exception as e:
+            errors.append(f"{type(e).__name__} {str(e)[:100]}")
+            continue
+    raise RuntimeError("所有LLM后端失败 | " + " | ".join(errors))
+
+
+def _chat_openai(cfg, messages, system, model, max_tokens, temperature, timeout):
+    if not cfg.get("CODEX_API_KEY"):
+        raise RuntimeError("no openai backend")
+    msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+    payload = {"model": model or cfg.get("CODEX_MODEL", "gpt-5.5"),
+               "messages": msgs, "temperature": temperature, "max_tokens": max_tokens}
+    req = urllib.request.Request(
+        f"{cfg['CODEX_BASE_URL'].rstrip('/')}/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {cfg['CODEX_API_KEY']}",
+                 "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode())
+    return data["choices"][0]["message"]["content"]
+
+
+def _chat_anthropic(cfg, messages, system, model, max_tokens, temperature, timeout):
+    if not cfg.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError("no anthropic backend")
+    payload = {"model": model or cfg["ANTHROPIC_MODEL"], "max_tokens": max_tokens,
+               "system": system or "你是声乐教练。",
+               "thinking": {"type": "disabled"},
+               "messages": list(messages)}
+    req = urllib.request.Request(
+        f"{cfg['ANTHROPIC_BASE_URL'].rstrip('/')}/v1/messages",
+        data=json.dumps(payload).encode(),
+        headers={"x-api-key": cfg["ANTHROPIC_API_KEY"],
+                 "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode())
+    parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+    return "".join(parts)

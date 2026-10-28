@@ -24,8 +24,15 @@ KEYS = {"prosody": PROSODY_KEYS, "timbre": TIMBRE_KEYS, "pref": PREF_KEYS}
 class Scorer:
     def __init__(self, ckpt_path=None, mert_path=None, stats_path=None, device=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        ckpt_path = ckpt_path or ROOT / "runs" / "r3" / "best.pt"
-        mert_path = mert_path or ROOT / "models" / "MERT-v1-95M"
+        if ckpt_path is None:
+            for cand in (ROOT / "models" / "singing_scorer_v1.pt",
+                         ROOT / "runs" / "r3" / "best.pt"):
+                if cand.exists():
+                    ckpt_path = cand
+                    break
+        if mert_path is None:
+            local = ROOT / "models" / "MERT-v1-95M"
+            mert_path = local if local.exists() else "m-a-p/MERT-v1-95M"
         stats_path = stats_path or ROOT / "models" / "feat_stats.json"
         stats = json.loads(Path(stats_path).read_text(encoding="utf-8"))
         self.mean = {(g, k): v[0] for g, d in stats.items() for k, v in d.items()}

@@ -50,6 +50,26 @@ PYTHONPATH=. python src/agent/diagnose.py 我唱的.wav --no-match
 PYTHONPATH=. python src/agent/diagnose.py 我唱的.wav -o result.json
 ```
 
+## 💬 对话模式（教练「小嗓」）
+
+运行后进入对话：直接打字聊声乐问题；`/sing` 对麦克风唱一段自动评测；
+`/file` 评测本地音频；LLM 会把分数翻译成教练评语。
+
+```bash
+PYTHONPATH=. python src/agent/chat.py
+```
+
+```
+你 > /song 月亮代表我的心        # 设定当前曲目
+你 > /sing                      # 回车开始录音，唱，回车结束 → 自动评测+评语
+你 > /file demo.wav             # 评测文件（哼唱也行，自动匹配曲目）
+你 > 我高音总挤嗓子怎么办？      # 自由对话
+```
+
+依赖 `sounddevice`（已在 requirements）；Linux 无 PortAudio 时 `/sing` 不可用、
+`/file` 不受影响（`conda install -c conda-forge portaudio` 可补齐）。
+未配置 LLM 后端时进入纯命令模式，只出分数表。
+
 ## 📊 输出说明
 
 `diagnose` 输出结构化 JSON：
@@ -95,16 +115,26 @@ export CODEX_BASE_URL=... CODEX_API_KEY=... CODEX_MODEL=...
 export ANTHROPIC_BASE_URL=... ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=...
 ```
 
-## 🗂 模型资产（仓库不包含，需单独准备）
+## 🗂 模型资产（仓库不包含，从 Release 下载）
+
+```bash
+mkdir -p models data
+REL=https://github.com/<OWNER>/music_agent/releases/download/v1.0.0
+wget -O models/singing_scorer_v1.pt $REL/singing_scorer_v1.pt   # 186M 评分网络权重(fp16)
+wget -O models/feat_stats.json      $REL/feat_stats.json        # 4K  特征归一化统计(必需)
+wget -O- $REL/reference_lib_v1.tar.gz | tar xz -C data/         # 110M 参考曲库845首(meta+歌词+F0)
+# MERT 编码器(361M)无需手动下载，首次运行自动从 HuggingFace m-a-p/MERT-v1-95M 拉取
+```
+
+资产布局：
 
 ```
 models/
-├── MERT-v1-95M/      # MERT 预训练编码器，HuggingFace: m-a-p/MERT-v1-95M
-└── feat_stats.json   # 特征 z-score 归一化统计
-runs/r3/best.pt       # 评分网络权重
-data/reference/<id>/  # 参考曲库，每首一个目录：
-                      #   meta.json(歌曲元信息) + ref.lrc.json(逐字歌词)
-                      #   ref.mp3 / ref.wav / ref_f0.npz 首次使用时自动缓存
+├── singing_scorer_v1.pt   # 评分网络权重（Scorer 默认加载）
+└── feat_stats.json        # 特征 z-score 归一化统计
+data/reference/<id>/       # 参考曲库，每首一个目录：
+                           #   meta.json(歌曲元信息) + ref.lrc.json(逐字歌词) + ref_f0.npz(F0曲线)
+                           #   推理只需这三件；新歌曲目首次使用时自动搜索下载
 ```
 
 ## 🧩 代码结构
@@ -122,7 +152,7 @@ src/
 ## ❓ FAQ
 
 **Q: 为什么仓库里没有权重和数据？**
-本仓库只开源评分相关代码。权重、归一化统计与参考曲库属于数据资产，需单独获取或自行构建。
+本仓库只开源评分相关代码。权重、归一化统计与参考曲库在 GitHub Release（v1.0.0）单独分发，见上方"模型资产"；MERT 编码器由 HuggingFace 自动下载。
 
 **Q: 哼唱识别准吗？**
 离线评测（200 个留出混音片段，845 首参考库）top1 36% / top5 45%。真实哼唱是无伴奏干净输入，实际会更好；混音重的中文现场片段识别率偏低。置信度 <0.5 时系统会返回候选请你确认，不会瞎猜。
