@@ -189,7 +189,12 @@ canvas.radar{width:200px;height:200px}
         <canvas id="avatarCv" style="width:100%;height:320px;display:block"></canvas>
       </div>
       <div id="avatarStatus" style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center">形象加载中…</div>
-      <div class="switch"><input type="checkbox" id="ttsOn" checked><label for="ttsOn">语音朗读点评（浏览器 TTS）</label></div>
+      <div class="switch"><input type="checkbox" id="ttsOn" checked><label for="ttsOn">语音朗读点评</label></div>
+      <select id="ttsVoice" style="width:100%;margin-top:8px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--ink);font-size:13px;outline:none">
+        <option value="zh-CN-XiaoyiNeural">🎀 元气少女（小艺）</option>
+        <option value="zh-CN-YunxiaNeural">🧸 奶萌童声（云夏）</option>
+        <option value="zh-CN-XiaoxiaoNeural">🌸 温柔姐姐（晓晓）</option>
+      </select>
     </div>
     <div class="card">
       <h3>💡 使用提示</h3>
@@ -357,16 +362,32 @@ function setSong(s){
   $('#songInp').value = curSong;
 }
 
-/* ================= TTS 朗读（浏览器内置语音，免费、无需配置） ================= */
+/* ================= TTS 朗读（优先后端 edge-tts 二次元声线，失败回退浏览器 TTS） ================= */
 window.avatarSpeaking = false;
-function speakText(text){
-  if(!$('#ttsOn')?.checked || !('speechSynthesis' in window)) return;
+let ttsAudio = null;
+async function speakText(text){
+  if(!$('#ttsOn')?.checked) return;
   const clean = String(text).replace(/```[\s\S]*?```/g,'。').replace(/[*#`>\[\]]/g,'')
     .replace(/^[-·]\s*/gm,'').replace(/\s+/g,' ').trim().slice(0,280);
   if(!clean) return;
-  speechSynthesis.cancel();
+  if('speechSynthesis' in window) speechSynthesis.cancel();
+  if(ttsAudio){ try{ ttsAudio.pause(); }catch(e){} ttsAudio = null; window.avatarSpeaking = false; }
+  // 首选：后端 edge-tts（微软在线声线，无 Key），与 3D 形象适配的少女音
+  try{
+    const voice = localStorage.getItem('ttsVoice') || 'zh-CN-XiaoyiNeural';
+    const r = await fetch(apiBase()+'/api/tts', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:clean, voice})});
+    if(!r.ok) throw new Error('tts '+r.status);
+    const url = URL.createObjectURL(await r.blob());
+    const au = ttsAudio = new Audio(url);
+    au.onplay  = ()=>{ if(ttsAudio===au) window.avatarSpeaking = true; };
+    au.onended = au.onerror = ()=>{ if(ttsAudio===au){ window.avatarSpeaking=false; ttsAudio=null; } URL.revokeObjectURL(url); };
+    await au.play();
+    return;
+  }catch(e){ /* 后端不通或 edge-tts 不可用 → 回退浏览器内置 TTS */ }
+  if(!('speechSynthesis' in window)) return;
   const u = new SpeechSynthesisUtterance(clean);
-  u.lang = 'zh-CN'; u.rate = 1.05;
+  u.lang = 'zh-CN'; u.rate = 1.12; u.pitch = 1.35;   // 回退也尽量贴近少女感
   const zh = speechSynthesis.getVoices().find(v=>/zh|中文|Chinese/i.test(v.lang+' '+v.name));
   if(zh) u.voice = zh;
   window.avatarSpeaking = true;
@@ -661,6 +682,14 @@ $('#songInp').addEventListener('input', e=>{
 });
 
 /* ================= 设置 ================= */
+// 声线选择持久化（即时生效，无需保存按钮）
+{
+  const vs = $('#ttsVoice');
+  if(vs){
+    vs.value = localStorage.getItem('ttsVoice') || 'zh-CN-XiaoyiNeural';
+    vs.addEventListener('change', ()=> localStorage.setItem('ttsVoice', vs.value));
+  }
+}
 const LLM_HINTS = {
   '': '不启用 LLM 时，评测功能不受影响，仅没有教练文字点评。',
   openai: 'OpenAI 官方填 <code>https://api.openai.com/v1</code>；DeepSeek / 通义千问 / 月之暗面 / vLLM / Ollama 等「OpenAI 兼容」服务也选这项，填它们给的 Base URL（一般到 /v1 为止）。',
@@ -791,6 +820,118 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
+/* ---- 温馨小屋背景：程序化生成（Canvas 纹理），零外部资源 ----
+   布局（角色在原点面朝 +Z，墙在 z=-1.6，可见区约 x±0.75 / y 0.5~2.05）：
+   后墙+地板+脚下软阴影，左侧暖光窗户，右侧音符海报+小书架，顶部串灯，漂浮尘埃 */
+function buildRoom(scene){
+  const room = {};
+  const ctex = (w, h, draw) => {
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    draw(c.getContext('2d'), w, h);
+    const t = new THREE.CanvasTexture(c);
+    if ('colorSpace' in t) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  scene.background = ctex(4, 256, (g, w, h) => {          // 墙没遮住的边缘底色
+    const gr = g.createLinearGradient(0, 0, 0, h);
+    gr.addColorStop(0, '#241f33'); gr.addColorStop(1, '#14121c');
+    g.fillStyle = gr; g.fillRect(0, 0, w, h);
+  });
+  const wall = new THREE.Mesh(new THREE.PlaneGeometry(7.5, 3.8),
+    new THREE.MeshStandardMaterial({ roughness: 0.96, map: ctex(16, 256, (g, w, h) => {
+      const gr = g.createLinearGradient(0, 0, 0, h);
+      gr.addColorStop(0, '#2d2740'); gr.addColorStop(1, '#1e1a29');
+      g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    })}));
+  wall.position.set(0, 1.9, -1.6); scene.add(wall);
+  const floor = new THREE.Mesh(new THREE.CircleGeometry(3.4, 40),
+    new THREE.MeshStandardMaterial({ roughness: 0.9, map: ctex(256, 256, (g, w, h) => {
+      const gr = g.createRadialGradient(w/2, h/2, 8, w/2, h/2, w/2);
+      gr.addColorStop(0, '#463b4f'); gr.addColorStop(1, '#1b1725');
+      g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    })}));
+  floor.rotation.x = -Math.PI / 2; floor.position.set(0, 0, 0.3); scene.add(floor);
+  const blob = new THREE.Mesh(new THREE.CircleGeometry(0.45, 32),   // 脚下软阴影
+    new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false,
+      map: ctex(128, 128, (g, w, h) => {
+        const gr = g.createRadialGradient(w/2, h/2, 4, w/2, h/2, w/2);
+        gr.addColorStop(0, 'rgba(0,0,0,.55)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr; g.fillRect(0, 0, w, h);
+      })}));
+  blob.rotation.x = -Math.PI / 2; blob.position.set(0, 0.006, 0); scene.add(blob);
+  // 左：暖光窗户
+  const win = new THREE.Group();
+  win.add(new THREE.Mesh(new THREE.PlaneGeometry(0.52, 0.74),
+    new THREE.MeshBasicMaterial({ map: ctex(128, 192, (g, w, h) => {
+      const gr = g.createRadialGradient(w*0.5, h*0.36, 6, w*0.5, h*0.5, w*0.78);
+      gr.addColorStop(0, '#ffe6b8'); gr.addColorStop(0.55, '#f7bd7d'); gr.addColorStop(1, '#c77f56');
+      g.fillStyle = gr; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#5a4034';
+      g.fillRect(w/2-3, 0, 6, h); g.fillRect(0, h/2-3, w, 6);     // 十字窗棂
+    })})));
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x352a2e, roughness: 0.8 });
+  [[0, 0.395, 0.62, 0.05], [0, -0.395, 0.62, 0.05],
+   [-0.285, 0, 0.05, 0.84], [0.285, 0, 0.05, 0.84]].forEach(([x, y, bw, bh]) => {
+    const f = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, 0.04), frameMat);
+    f.position.set(x, y, 0.005); win.add(f);
+  });
+  const sill = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.05, 0.08), frameMat);
+  sill.position.set(0, -0.44, 0.03); win.add(sill);
+  win.position.set(-0.48, 1.55, -1.585); scene.add(win);
+  room.winLight = new THREE.PointLight(0xffc98a, 0.6, 4.5);
+  room.winLight.position.set(-0.48, 1.5, -1.05); scene.add(room.winLight);
+  // 右：音符海报 + 小书架
+  const poster = new THREE.Mesh(new THREE.PlaneGeometry(0.40, 0.56),
+    new THREE.MeshBasicMaterial({ map: ctex(128, 180, (g, w, h) => {
+      g.fillStyle = '#221d31'; g.fillRect(0, 0, w, h);
+      g.strokeStyle = '#e8c07a'; g.lineWidth = 3; g.strokeRect(7, 7, w-14, h-14);
+      g.fillStyle = '#e8c07a'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.font = '64px serif'; g.fillText('♪', w/2, h/2 - 8);
+      g.font = '26px serif'; g.fillStyle = '#57c7b2'; g.fillText('♫', w/2 + 28, h/2 + 34);
+    })}));
+  poster.position.set(0.48, 1.42, -1.585); poster.rotation.z = -0.05; scene.add(poster);
+  const shelf = new THREE.Group();
+  const plank = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.035, 0.13),
+    new THREE.MeshStandardMaterial({ color: 0x4a3630, roughness: 0.85 }));
+  shelf.add(plank);
+  ['#57c7b2', '#e8c07a', '#b56a6a', '#7a86b8', '#5f9e78'].forEach((col, i) => {
+    const bk = new THREE.Mesh(new THREE.BoxGeometry(0.042, 0.14 + (i % 3) * 0.02, 0.10),
+      new THREE.MeshStandardMaterial({ color: col, roughness: 0.9 }));
+    bk.position.set(-0.18 + i * 0.055, 0.09, 0);
+    if (i === 4){ bk.rotation.z = 0.16; bk.position.y = 0.085; }   // 一本斜放
+    shelf.add(bk);
+  });
+  shelf.position.set(0.42, 0.88, -1.5); scene.add(shelf);
+  // 顶部串灯（弧线 + 小灯泡，呼吸微闪）
+  const lp = [];
+  for (let i = 0; i <= 24; i++){
+    const x = -0.95 + i * (1.9 / 24);
+    lp.push(new THREE.Vector3(x, 1.98 + 0.09 * (x / 0.95) ** 2, -1.56));
+  }
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(lp),
+    new THREE.LineBasicMaterial({ color: 0x463f54 })));
+  room.bulbMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0, transparent: true, opacity: 0.9 });
+  const bulbGeo = new THREE.SphereGeometry(0.016, 8, 6);
+  for (let i = 1; i < 24; i += 2){
+    const b = new THREE.Mesh(bulbGeo, room.bulbMat);
+    b.position.copy(lp[i]); b.position.y -= 0.032; scene.add(b);
+  }
+  // 漂浮尘埃（动画在渲染循环里驱动）
+  const N = 42, pos = new Float32Array(N * 3);
+  room.dustBase = new Float32Array(N);
+  for (let i = 0; i < N; i++){
+    const x = (Math.random() * 2 - 1) * 1.05;
+    pos[i*3] = x; pos[i*3+1] = 0.35 + Math.random() * 1.9; pos[i*3+2] = -1.35 + Math.random() * 2.1;
+    room.dustBase[i] = x;
+  }
+  const dg = new THREE.BufferGeometry();
+  dg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  room.dust = new THREE.Points(dg, new THREE.PointsMaterial({ color: 0xffe6c0, size: 0.011,
+    transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false }));
+  scene.add(room.dust);
+  return room;
+}
+
 const cv = document.getElementById('avatarCv');
 const statusEl = document.getElementById('avatarStatus');
 const setStatus = t => { if (statusEl) statusEl.textContent = t; };
@@ -802,9 +943,10 @@ try {
   const W = cv.clientWidth || 296, H = cv.clientHeight || 320;
   renderer.setSize(W, H, false);
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(26, W / H, 0.05, 30);
+  const camera = new THREE.PerspectiveCamera(28, W / H, 0.05, 30);
   scene.add(new THREE.HemisphereLight(0xfff2dd, 0x2a3040, 1.15));
   const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(1.2, 2.0, 1.6); scene.add(key);
+  const room = buildRoom(scene);
 
   const loader = new GLTFLoader();
   loader.register(p => new VRMLoaderPlugin(p));
@@ -814,12 +956,12 @@ try {
     if (String(vrm.meta?.metaVersion || '0') === '0') VRMUtils.rotateVRM0(vrm);
     scene.add(vrm.scene);
     vrm.scene.updateMatrixWorld(true);
-    startAnim(vrm, renderer, scene, camera);
+    startAnim(vrm, renderer, scene, camera, room);
     setStatus('待命中 — 唱一段给我听吧');
   }, undefined, err => { console.warn('VRM 加载失败', err); setStatus('3D 形象加载失败（不影响评测）'); });
 } catch (e) { console.warn(e); setStatus('当前环境不支持 3D（不影响评测）'); }
 
-function startAnim(vrm, renderer, scene, camera){
+function startAnim(vrm, renderer, scene, camera, room){
   const em = vrm.expressionManager;
   const has = n => { try { return !!em.getExpression(n); } catch(e) { return false; } };
   const expr = (n, v) => { if (n && has(n)) em.setValue(n, v); };
@@ -848,11 +990,11 @@ function startAnim(vrm, renderer, scene, camera){
   if (lArmL) lArmL.rotation.z =  0.12;
   if (lArmR) lArmR.rotation.z = -0.12;
 
-  /* 头肩胸取景：头部骨骼定位，距离 1.6m 拍胸像（包围盒会被头发撑大导致偏移） */
+  /* 头肩胸取景：头部骨骼定位，距离 1.75m 拍胸像并带上房间背景（包围盒会被头发撑大导致偏移） */
   if (head){
     const hp = head.getWorldPosition(new THREE.Vector3());
-    camera.position.set(hp.x, hp.y + 0.02, hp.z + 1.6);
-    camera.lookAt(hp.x, hp.y - 0.15, hp.z);
+    camera.position.set(hp.x, hp.y + 0.02, hp.z + 1.75);
+    camera.lookAt(hp.x, hp.y - 0.17, hp.z);
   } else {
     const box = new THREE.Box3().setFromObject(vrm.scene);
     const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
@@ -924,6 +1066,20 @@ function startAnim(vrm, renderer, scene, camera){
       head.rotation.z = cur.headZ;
     }
     if (neck) neck.rotation.y = 0.04 * cur.sway * Math.sin(t * 0.3);
+    // 房间动效：尘埃上浮漂移、串灯呼吸、窗光微颤
+    if (room){
+      if (room.dust){
+        const p = room.dust.geometry.attributes.position;
+        for (let i = 0; i < room.dustBase.length; i++){
+          let y = p.getY(i) + dt * 0.035; if (y > 2.3) y = 0.35;
+          p.setY(i, y);
+          p.setX(i, room.dustBase[i] + Math.sin(t * 0.4 + i * 1.7) * 0.04);
+        }
+        p.needsUpdate = true;
+      }
+      if (room.bulbMat) room.bulbMat.opacity = 0.72 + 0.22 * Math.sin(t * 2.1);
+      if (room.winLight) room.winLight.intensity = 0.55 + 0.08 * Math.sin(t * 1.3);
+    }
     vrm.update(dt);
     renderer.render(scene, camera);
   })();

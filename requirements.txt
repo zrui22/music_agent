@@ -10,3 +10,5 @@ sounddevice
 fastapi
 uvicorn[standard]
 python-multipart
+httpx
+edge-tts

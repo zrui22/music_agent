@@ -85,6 +85,7 @@ PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 9527
 | `GET /api/library?q=` | 参考曲库检索（歌名补全） |
 | `POST /api/diagnose` | multipart 上传音频评测（可带 `song` / `auto_match`），内置歌声门控 |
 | `POST /api/llm/relay` | LLM 无状态中转（前端默认经它转发 LLM 请求，Key 不落地） |
+| `POST /api/tts` | 语音合成（edge-tts 在线声线，免费无 Key；前端可选声线，失败自动回退浏览器 TTS） |
 
 **歌声门控**：`/api/diagnose` 先判断"有没有唱"（响度 / F0 发声占比 / 最长持续音
 三个轻量信号），空录音、纯噪声、说话会直接返回 `{"singing": false, "message": …}`

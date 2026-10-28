@@ -8,12 +8,15 @@ API：
     GET  /api/library    参考曲库列表，?q= 过滤（歌名补全）
     POST /api/diagnose   multipart: file=音频, song?=歌名, auto_match?=bool -> 完整评测 JSON
     POST /api/llm/relay  可选的 LLM 无状态中转（仅当浏览器直连被 CORS 拦截时使用）
+    POST /api/tts        语音合成（edge-tts 在线声线，免费无 Key；失败时前端自动回退浏览器 TTS）
     GET  /               前端单页（web/index.html）
 LLM 评语/对话默认由前端持有用户自填的 API Key 直连服务商，本服务不存储任何 LLM 凭据；
 /api/llm/relay 仅为绕过浏览器 CORS 的无状态转发——Key 随请求来、随响应走，不落盘、不记日志。
 交互式 API 文档：/docs（Swagger UI）
 """
 import asyncio
+import collections
+import re
 import tempfile
 import threading
 import time
@@ -21,7 +24,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -159,6 +162,52 @@ async def llm_relay(req: Request):
         text = "".join(b.get("text", "") for b in d.get("content", [])
                        if isinstance(b, dict) and b.get("type") == "text")
     return {"text": text}
+
+
+# ---------- TTS（edge-tts 在线语音，免费无 Key；失败时前端回退浏览器 TTS） ----------
+
+_TTS_CACHE = collections.OrderedDict()   # (voice, pitch, rate, text) -> mp3 bytes，上限 32 条
+_TTS_VOICE = re.compile(r"^zh-CN-[A-Za-z]+Neural$")
+
+
+@app.post("/api/tts")
+async def api_tts(req: Request):
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"error": "请求体不是 JSON"}, 400)
+    text = str(body.get("text") or "").strip()[:280]
+    if not text:
+        return JSONResponse({"error": "text 为空"}, 400)
+    voice = str(body.get("voice") or "")
+    if not _TTS_VOICE.fullmatch(voice):
+        voice = "zh-CN-XiaoyiNeural"
+    pitch = str(body.get("pitch") or "")
+    if not re.fullmatch(r"[+-]\d{1,3}Hz", pitch):
+        pitch = "+15Hz"
+    rate = str(body.get("rate") or "")
+    if not re.fullmatch(r"[+-]\d{1,2}%", rate):
+        rate = "+4%"
+    key = (voice, pitch, rate, text)
+    if key in _TTS_CACHE:
+        _TTS_CACHE.move_to_end(key)
+        return Response(content=_TTS_CACHE[key], media_type="audio/mpeg")
+    try:
+        import edge_tts
+        comm = edge_tts.Communicate(text, voice=voice, rate=rate, pitch=pitch)
+        buf = bytearray()
+        async for chunk in comm.stream():
+            if chunk.get("type") == "audio" and chunk.get("data"):
+                buf.extend(chunk["data"])
+    except Exception as e:
+        return JSONResponse({"error": f"TTS 失败: {type(e).__name__}: {e}"}, 502)
+    if not buf:
+        return JSONResponse({"error": "TTS 无音频输出"}, 502)
+    data = bytes(buf)
+    _TTS_CACHE[key] = data
+    if len(_TTS_CACHE) > 32:
+        _TTS_CACHE.popitem(last=False)
+    return Response(content=data, media_type="audio/mpeg")
 
 
 # ---------- 前端 ----------
