@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>声诊 · Singing Coach</title>
+<script type="importmap">
+{"imports":{
+  "three":"/vendor/three.module.js",
+  "three/addons/":"/vendor/addons/",
+  "@pixiv/three-vrm":"/vendor/three-vrm.module.js"
+}}
+</script>
 <style>
 :root{
   --bg:#0e0f14; --panel:#161820; --panel2:#1d2029; --line:#2b2f3c;
@@ -106,6 +113,9 @@ canvas.radar{width:200px;height:200px}
 .cbtn.rec{border-color:var(--red);color:var(--red)}
 .cbtn.rec.on{background:var(--red);color:#fff;animation:pulse 1.2s infinite}
 @keyframes pulse{50%{box-shadow:0 0 0 6px rgba(224,108,117,.18)}}
+.rec-prev{align-self:flex-end;background:linear-gradient(135deg,#2a2f42,#232636);border:1px solid #333a4f;border-radius:var(--r);border-bottom-right-radius:4px;padding:12px 16px;max-width:86%;animation:rise .25s ease}
+.rec-prev audio{width:250px;max-width:100%;height:38px;margin-top:8px;display:block;filter:invert(.9) hue-rotate(180deg)}
+.rec-prev .ops{display:flex;gap:8px;margin-top:10px;align-items:center}
 #songChip{font-size:12px;color:var(--teal);border:1px dashed rgba(87,199,178,.4);padding:6px 12px;border-radius:99px;background:var(--teal-soft);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ---------- Side panel ---------- */
@@ -120,10 +130,6 @@ canvas.radar{width:200px;height:200px}
 .ac-list div:hover,.ac-list div.sel{background:var(--teal-soft);color:var(--ink)}
 .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-top:12px}
 .switch input{accent-color:var(--gold)}
-.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.stat{background:var(--panel2);border-radius:10px;padding:10px 12px}
-.stat .k{font-size:11px;color:var(--muted)}
-.stat .v{font-size:19px;font-family:var(--serif);color:var(--ink);margin-top:2px}
 .hint{font-size:12px;color:var(--muted);line-height:1.8}
 .hint code{background:#0007;padding:1px 5px;border-radius:4px}
 
@@ -178,13 +184,12 @@ canvas.radar{width:200px;height:200px}
       <div class="switch"><input type="checkbox" id="autoReview" checked><label for="autoReview">评测后自动生成教练点评</label></div>
     </div>
     <div class="card">
-      <h3>📊 状态</h3>
-      <div class="stat-grid">
-        <div class="stat"><div class="k">评分模型</div><div class="v" id="stModel">—</div></div>
-        <div class="stat"><div class="k">推理设备</div><div class="v" id="stDev">—</div></div>
-        <div class="stat"><div class="k">参考曲库</div><div class="v" id="stLib">—</div></div>
-        <div class="stat"><div class="k">LLM 评语</div><div class="v" id="stLLM">—</div></div>
+      <h3>🎙 教练小嗓</h3>
+      <div id="avatarBox" style="border-radius:12px;overflow:hidden;background:radial-gradient(120% 90% at 50% 20%,#232738,#14161e);border:1px solid var(--line)">
+        <canvas id="avatarCv" style="width:100%;height:270px;display:block"></canvas>
       </div>
+      <div id="avatarStatus" style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center">形象加载中…</div>
+      <div class="switch"><input type="checkbox" id="ttsOn" checked><label for="ttsOn">语音朗读点评（浏览器 TTS）</label></div>
     </div>
     <div class="card">
       <h3>💡 使用提示</h3>
@@ -309,6 +314,29 @@ function setSong(s){
   $('#songInp').value = curSong;
 }
 
+/* ================= TTS 朗读（浏览器内置语音，免费、无需配置） ================= */
+window.avatarSpeaking = false;
+function speakText(text){
+  if(!$('#ttsOn')?.checked || !('speechSynthesis' in window)) return;
+  const clean = String(text).replace(/```[\s\S]*?```/g,'。').replace(/[*#`>\[\]]/g,'')
+    .replace(/^[-·]\s*/gm,'').replace(/\s+/g,' ').trim().slice(0,280);
+  if(!clean) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(clean);
+  u.lang = 'zh-CN'; u.rate = 1.05;
+  const zh = speechSynthesis.getVoices().find(v=>/zh|中文|Chinese/i.test(v.lang+' '+v.name));
+  if(zh) u.voice = zh;
+  window.avatarSpeaking = true;
+  u.onend = u.onerror = ()=>{ window.avatarSpeaking = false; };
+  speechSynthesis.speak(u);
+}
+/* 3D 形象兜底提示：10 秒后仍未就绪则说明资源未加载 */
+setTimeout(()=>{
+  const a = window.avatarAPI, el = document.getElementById('avatarStatus');
+  if(el && (!a || !a.ready) && el.textContent.includes('加载中'))
+    el.textContent = '3D 形象未加载（不影响评测功能）';
+}, 10000);
+
 /* ================= 消息渲染 ================= */
 function addMsg(role, html){
   const d = document.createElement('div');
@@ -418,9 +446,9 @@ function renderEval(diag){
   // 问题片段
   if(diag.segments && diag.segments.length){
     const s = document.createElement('div'); s.className='segs';
-    s.innerHTML = '<h4>🎯 问题片段（音分偏差 > 40 的乐句）</h4>' + diag.segments.slice(0,5).map(g=>
-      `<div class="seg"><span class="t">${g.start?.toFixed(1)}s</span>
-       <span class="cents ${g.abs_cents>60?'bad':''}">${g.abs_cents}音分</span>
+    s.innerHTML = '<h4>🎯 问题片段（音分偏差偏大的乐句）</h4>' + diag.segments.slice(0,5).map(g=>
+      `<div class="seg"><span class="t">${g.start_s?.toFixed(1)}s</span>
+       <span class="cents ${g.median_abs_cents>60?'bad':''}">${g.median_abs_cents}音分</span>
        <span>${esc(g.lyric||'')}</span></div>`).join('');
     card.appendChild(s);
   }
@@ -437,6 +465,7 @@ function renderEval(diag){
 async function runDiagnose(blob, fname){
   const typing = addTyping();
   typing.innerHTML = '评测中（F0 提取 → 曲目匹配 → 神经评分）<i></i><i></i><i></i>';
+  window.avatarAPI?.status('分析中：音高提取 → 匹配 → 评分…');
   const fd = new FormData();
   fd.append('file', blob, fnameSafe(blob.name||'record.webm'));
   if(curSong) fd.append('song', curSong);
@@ -444,13 +473,25 @@ async function runDiagnose(blob, fname){
   try{
     const diag = await api('/api/diagnose', {method:'POST', body:fd});
     typing.remove();
+    if(diag.singing === false){   // 门控拦截：没唱/空录音/说话
+      const g = diag.gate || {};
+      addMsg('coach', esc(diag.message || '似乎没有检测到歌声，再试一次？') +
+        `<div style="font-size:12px;color:var(--muted);margin-top:8px">响度 ${g.rms_db} dB · 发声占比 ${Math.round((g.voiced_ratio||0)*100)}% · 最长持续音 ${g.longest_voiced_s}s</div>`);
+      window.avatarAPI?.react('confused');
+      speakText(diag.message || '似乎没有检测到歌声，再试一次？');
+      return;
+    }
     lastDiag = diag;
     renderEval(diag);
     if(diag.match && diag.match.song && diag.match.confidence>=0.5 && !curSong)
       setSong(diag.match.song);
+    const ov = (diag.subjective||{}).overall;
+    window.avatarAPI?.react(typeof ov === 'number' ? ov : 3);
+    window.avatarAPI?.status('评测完成');
     if($('#autoReview').checked) coachReview(diag);
   }catch(e){
     typing.remove();
+    window.avatarAPI?.status('待命中');
     toast('评测失败：'+e.message, true);
   }
 }
@@ -459,14 +500,18 @@ function fnameSafe(n){ return n.replace(/[^\w.\-一-鿿]/g,'_'); }
 async function coachReview(diag){
   if(!llmReady()){ addMsg('sys','点右上角「⚙ API」填入 LLM 配置后，这里会自动生成教练点评'); return; }
   const typing = addTyping();
+  window.avatarAPI?.status('正在组织点评…');
   const content = '[评测结果] '+JSON.stringify(diag, (k,v)=>k==='segments'?undefined:v);
   try{
     const reply = await llmDirect([...history.slice(-8), {role:'user',content}]);
     typing.remove();
     history.push({role:'user',content:'（提交了一次演唱评测）'},{role:'assistant',content:reply});
     addMsg('coach', mdLite(reply));
+    speakText(reply);
+    window.avatarAPI?.status('待命中');
   }catch(e){
     typing.remove();
+    window.avatarAPI?.status('待命中');
     toast('教练点评失败：'+e.message, true);
   }
 }
@@ -482,14 +527,16 @@ async function sendChat(text){
     typing.remove();
     history.push({role:'assistant', content:reply});
     addMsg('coach', mdLite(reply));
+    speakText(reply);
   }catch(e){
     typing.remove();
     toast('对话失败：'+e.message, true);
   }
 }
 
-/* ================= 录音 ================= */
-let mediaRec = null, recChunks = [], recStream = null;
+/* ================= 录音（停止后先试听，确认才发送） ================= */
+let mediaRec = null, recChunks = [], recStream = null, recTimer = null, recT0 = 0;
+function fmtDur(s){ s=Math.max(0,Math.round(s)); return (s/60|0)+':'+String(s%60).padStart(2,'0'); }
 async function toggleRec(){
   if(recStream){ stopRec(); return; }
   if(!navigator.mediaDevices?.getUserMedia){ toast('当前浏览器/环境不支持录音（需 https 或 localhost）', true); return; }
@@ -502,15 +549,40 @@ async function toggleRec(){
   mediaRec.onstop = ()=>{
     const blob = new Blob(recChunks, {type:mediaRec.mimeType||'audio/webm'});
     recStream.getTracks().forEach(t=>t.stop()); recStream=null;
+    clearInterval(recTimer);
     $('#btnRec').classList.remove('on'); $('#btnRec').textContent='🎤 演唱';
-    addMsg('user', '🎤 <i>（演唱录音 '+ (blob.size/1024|0) +' KB）</i>');
-    runDiagnose(blob, 'record.webm');
+    window.avatarAPI?.status('录音完成，等你确认发送');
+    showRecPreview(blob, (Date.now()-recT0)/1000);
   };
   mediaRec.start();
-  $('#btnRec').classList.add('on'); $('#btnRec').textContent='⏹ 结束';
+  recT0 = Date.now();
+  $('#btnRec').classList.add('on'); $('#btnRec').textContent='⏹ 0:00';
+  recTimer = setInterval(()=>{ $('#btnRec').textContent='⏹ '+fmtDur((Date.now()-recT0)/1000); }, 250);
+  window.avatarAPI?.status('正在聆听你的演唱…');
   toast('录音中，请开始演唱，再点一次结束');
 }
 function stopRec(){ if(mediaRec && mediaRec.state!=='inactive') mediaRec.stop(); }
+
+/* 录音试听气泡：确认发送 / 丢弃重录 */
+function showRecPreview(blob, secs){
+  const d = document.createElement('div');
+  d.className = 'rec-prev';
+  const url = URL.createObjectURL(blob);
+  d.innerHTML = `🎤 <b>录音 ${fmtDur(secs)}</b><span style="color:var(--muted);font-size:12px">（${(blob.size/1024|0)} KB）</span>
+    <audio controls src="${url}"></audio>
+    <div class="ops">
+      <button class="cbtn primary" style="padding:7px 14px;font-size:13px">✓ 发送评测</button>
+      <button class="cbtn" style="padding:7px 14px;font-size:13px">✕ 丢弃重录</button>
+    </div>`;
+  const [ok, no] = d.querySelectorAll('.ops button');
+  ok.onclick = ()=>{
+    d.querySelector('.ops').innerHTML = '<span style="font-size:12px;color:var(--muted)">已发送，评测中…</span>';
+    runDiagnose(blob, 'record.webm');
+  };
+  no.onclick = ()=>{ URL.revokeObjectURL(url); d.remove(); toast('已丢弃，可以重新录音'); };
+  $('#stream').appendChild(d);
+  d.scrollIntoView({behavior:'smooth', block:'end'});
+}
 
 /* ================= 歌名补全 ================= */
 let acTimer=null;
@@ -562,8 +634,6 @@ async function loadHealth(){
     $('#bModel').className='badge ok';   $('#bModel').innerHTML='<span class="dot"></span>模型 就绪';
     $('#bLLM').className='badge '+(llmReady()?'ok':'warn'); $('#bLLM').innerHTML='<span class="dot"></span>LLM '+(llmReady()?'已配置':'未配置');
     $('#bLib').className='badge ok';     $('#bLib').innerHTML=`<span class="dot"></span>曲库 ${h.library_size} 首`;
-    $('#stModel').textContent='R3'; $('#stDev').textContent=h.device;
-    $('#stLib').textContent=h.library_size; $('#stLLM').textContent=llmReady()?'已配置':'未配置';
   }catch(e){
     $('#bModel').className='badge err'; $('#bModel').innerHTML='<span class="dot"></span>后端离线';
     toast('无法连接后端：'+e.message, true);
@@ -581,6 +651,105 @@ $('#fileInp').addEventListener('change', e=>{
 });
 setSong(curSong);
 loadHealth();
+</script>
+
+<script type="module">
+/* ================= 3D 教练形象（three.js + VRM，本地资源，无外部依赖） ================= */
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+const cv = document.getElementById('avatarCv');
+const statusEl = document.getElementById('avatarStatus');
+const setStatus = t => { if (statusEl) statusEl.textContent = t; };
+window.avatarAPI = { ready: false, react(){}, status: setStatus };
+
+try {
+  const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+  const W = cv.clientWidth || 296, H = cv.clientHeight || 270;
+  renderer.setSize(W, H, false);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(26, W / H, 0.05, 30);
+  scene.add(new THREE.HemisphereLight(0xfff2dd, 0x2a3040, 1.15));
+  const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(1.2, 2.0, 1.6); scene.add(key);
+
+  const loader = new GLTFLoader();
+  loader.register(p => new VRMLoaderPlugin(p));
+  loader.load('/assets/avatar.vrm', gltf => {
+    const vrm = gltf.userData.vrm;
+    try { VRMUtils.removeUnnecessaryVertices(gltf.scene); VRMUtils.combineSkeletons(gltf.scene); } catch(e) {}
+    if (String(vrm.meta?.metaVersion || '0') === '0') VRMUtils.rotateVRM0(vrm);
+    scene.add(vrm.scene);
+    // 胸像取景（按模型包围盒自适应）
+    const box = new THREE.Box3().setFromObject(vrm.scene);
+    const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+    camera.position.set(ctr.x, box.max.y - size.y * 0.16, ctr.z + size.y * 0.78);
+    camera.lookAt(ctr.x, box.max.y - size.y * 0.20, ctr.z);
+    startAnim(vrm, renderer, scene, camera);
+    setStatus('待命中 — 唱一段给我听吧');
+  }, undefined, err => { console.warn('VRM 加载失败', err); setStatus('3D 形象加载失败（不影响评测）'); });
+} catch (e) { console.warn(e); setStatus('当前环境不支持 3D（不影响评测）'); }
+
+function startAnim(vrm, renderer, scene, camera){
+  const em = vrm.expressionManager;
+  const has = n => { try { return !!em.getExpression(n); } catch(e) { return false; } };
+  const expr = (n, v) => { if (n && has(n)) em.setValue(n, v); };
+  const firstOf = ns => ns.find(has);
+  // VRM 1.0 / 0.x 表情名兼容（Alicia 为 0.x：joy/sorrow/fun/a/blink）
+  const EXPR = {
+    happy: firstOf(['happy', 'joy']), sad: firstOf(['sad', 'sorrow']),
+    relaxed: firstOf(['relaxed', 'fun']), surprised: firstOf(['surprised']),
+    mouth: firstOf(['aa', 'a']), blink: firstOf(['blink']),
+  };
+  const bone = n => { try { return vrm.humanoid.getBoneNode(n); } catch(e) { return null; } };
+  const head = bone('head'), chest = bone('chest') || bone('upperChest');
+
+  let blinkAt = 1.5, blinking = 0, reactName = null, reactUntil = 0, shakeUntil = 0;
+  const clock = new THREE.Clock();
+
+  window.avatarAPI = {
+    ready: true,
+    status: setStatus,
+    react(kind){
+      // kind: 综合分（0-5）或 'confused'（没听清）
+      if (kind === 'confused'){ reactName = EXPR.surprised || null; shakeUntil = performance.now() / 1000 + 1.1; }
+      else if (kind >= 4) reactName = EXPR.happy;
+      else if (kind >= 3) reactName = EXPR.relaxed;
+      else reactName = EXPR.sad;
+      reactUntil = performance.now() / 1000 + 4;
+    },
+  };
+
+  (function loop(){
+    requestAnimationFrame(loop);
+    const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+    const now = performance.now() / 1000;
+    // 眨眼
+    blinkAt -= dt;
+    if (blinkAt <= 0){ blinking = 0.14; blinkAt = 2.2 + Math.random() * 3.6; }
+    let bv = 0;
+    if (blinking > 0){ blinking -= dt; bv = blinking > 0.055 ? 1 : 0; }
+    expr(EXPR.blink, bv);
+    // 打分反应表情（4 秒）
+    const active = reactName && now < reactUntil;
+    for (const n of [EXPR.happy, EXPR.sad, EXPR.relaxed, EXPR.surprised])
+      expr(n, n === reactName && active ? 0.9 : 0);
+    if (reactName && !active) reactName = null;
+    // 口型：TTS 朗读时快速开合（幅度带抖动更自然）
+    expr(EXPR.mouth, window.avatarSpeaking
+      ? 0.25 + 0.6 * Math.abs(Math.sin(t * 12 + Math.sin(t * 7)))
+      : 0);
+    // 呼吸、微转头；confused 时摇头
+    if (chest) chest.rotation.x = 0.025 * Math.sin(t * 1.5);
+    if (head){
+      if (now < shakeUntil){ head.rotation.y = 0.22 * Math.sin(t * 9); head.rotation.x = 0.05; }
+      else { head.rotation.y = 0.07 * Math.sin(t * 0.45); head.rotation.x = 0.035 * Math.sin(t * 0.8); }
+    }
+    vrm.update(dt);
+    renderer.render(scene, camera);
+  })();
+}
 </script>
 </body>
 </html>

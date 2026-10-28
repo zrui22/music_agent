@@ -26,6 +26,42 @@ from src.agent.scorer import Scorer, SR
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _singing_gate(times, voiced, rms_db: float) -> dict:
+    """歌唱门控：匹配/评分之前先判断"有没有唱"，拦截空录音、噪声、纯说话。
+
+    三个轻量信号（都来自必做的 F0/响度计算，零额外成本）：
+      rms_db         整体响度          —— 空录音/麦克风没开
+      voiced_ratio   F0 浊音帧占比     —— 纯噪声/伴奏几乎提不出稳定音高
+      longest_voiced_s 最长连续发声段  —— 说话音高短促抖动，唱歌才有持续长音
+    阈值刻意宽松（宁可放过、不可冤枉正常演唱）。
+    """
+    v = np.asarray(voiced).astype(bool)
+    ratio = float(v.mean()) if len(v) else 0.0
+    hop = float(np.median(np.diff(times))) if len(times) > 1 else 0.02
+    best = cur = 0
+    for x in v:
+        cur = cur + 1 if x else 0
+        if cur > best:
+            best = cur
+    longest_s = round(best * hop, 2)
+    g = {"rms_db": round(float(rms_db), 1),
+         "voiced_ratio": round(ratio, 3),
+         "longest_voiced_s": longest_s}
+    if rms_db < -45:
+        return {"sing": False, "reason": "silent",
+                "message": "没有听到声音：录音几乎是空的。检查麦克风权限和音量，靠近一点再唱。",
+                **g}
+    if ratio < 0.10:
+        return {"sing": False, "reason": "no_voice",
+                "message": "没有检测到歌声：听起来更像噪声或纯伴奏。请对着麦克风清唱一段。",
+                **g}
+    if longest_s < 0.6:
+        return {"sing": False, "reason": "speech_like",
+                "message": "听起来更像说话而不是唱歌：带上旋律唱几句，持续 15 秒以上效果最佳。",
+                **g}
+    return {"sing": True, "reason": "ok", **g}
+
+
 def _lyric_at(lrc: list, t_s: float) -> str:
     """ref 时间 -> 所在歌词行。"""
     if not lrc:
@@ -62,7 +98,7 @@ def _segment_evidence(view, lrc: list, min_dur: float = 4.0) -> list:
 
 def diagnose(audio_path: str, song: str = None, auto_match: bool = True,
              n_windows: int = 5, scorer: Scorer = None,
-             work_dir: str = None) -> dict:
+             work_dir: str = None, singing_gate: bool = True) -> dict:
     t_start = time.time()
     audio_path = Path(audio_path)
     tmp = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="agent_"))
@@ -71,9 +107,22 @@ def diagnose(audio_path: str, song: str = None, auto_match: bool = True,
     if not to_wav(audio_path, wav24, sr=SR):
         raise RuntimeError(f"音频转换失败: {audio_path}")
 
+    import soundfile as sf
+    wav, _sr = sf.read(str(wav24), dtype="float32", always_2d=True)
+    wav = wav.mean(axis=1)
+    rms_db = 20.0 * np.log10(float(np.sqrt((wav ** 2).mean()) + 1e-12) + 1e-12)
+
     # F0 + 发声特征（同一份 F0 缓存复用）
     c_t, c_m, c_v = extract_f0(str(wav24))
     dur = float(c_t[-1]) if len(c_t) else 0.0
+
+    # 门控：没唱就直接打回，不做匹配与评分（空录音防误判）
+    gate = _singing_gate(c_t, c_v, rms_db)
+    if singing_gate and not gate["sing"]:
+        return {"singing": False, "message": gate["message"], "gate": gate,
+                "audio": str(audio_path), "duration_s": round(dur, 1),
+                "elapsed_s": round(time.time() - t_start, 1)}
+
     f0_cache = {"times": c_t, "midi": c_m, "voiced": c_v}
     pro = prosody_features(str(wav24), 0.0, dur, f0_cache=f0_cache)
     tbr = timbre_features(str(wav24), 0.0, dur)
@@ -134,14 +183,12 @@ def diagnose(audio_path: str, song: str = None, auto_match: bool = True,
 
     # --- 网络主观分 ---
     scorer = scorer or Scorer()
-    import soundfile as sf
-    wav, sr = sf.read(str(wav24), dtype="float32", always_2d=True)
-    wav = wav.mean(axis=1)
     net = scorer.score(wav, {"prosody": pro, "timbre": tbr, "pref": pref or None},
                        n_windows=n_windows)
 
     result = {
         "audio": str(audio_path), "duration_s": round(dur, 1),
+        "singing": True, "gate": gate,
         "voiced_ratio": round(float(c_v.mean()), 3),
         "match": match,
         "objective": objective,          # 算法真值（有参考时），最终呈现以此为准
@@ -182,10 +229,13 @@ def main():
     ap.add_argument("--song", default=None, help="歌名（跳过哼唱匹配，最可靠）")
     ap.add_argument("--no-match", action="store_true", help="不做任何匹配，免参考模式")
     ap.add_argument("--windows", type=int, default=5)
+    ap.add_argument("--no-gate", action="store_true",
+                    help="跳过歌唱门控（强制完整评测，调试用）")
     ap.add_argument("-o", "--out", default=None)
     args = ap.parse_args()
     result = diagnose(args.audio, song=args.song,
-                      auto_match=not args.no_match, n_windows=args.windows)
+                      auto_match=not args.no_match, n_windows=args.windows,
+                      singing_gate=not args.no_gate)
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")

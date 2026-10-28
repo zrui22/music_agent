@@ -83,14 +83,22 @@ PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 8900
 |---|---|
 | `GET /api/health` | 模型/设备/曲库状态 |
 | `GET /api/library?q=` | 参考曲库检索（歌名补全） |
-| `POST /api/diagnose` | multipart 上传音频评测（可带 `song` / `auto_match`） |
+| `POST /api/diagnose` | multipart 上传音频评测（可带 `song` / `auto_match`），内置歌声门控 |
+
+**歌声门控**：`/api/diagnose` 先判断"有没有唱"（响度 / F0 发声占比 / 最长持续音
+三个轻量信号），空录音、纯噪声、说话会直接返回 `{"singing": false, "message": …}`
+而不会误匹配、误评分。调试时可用 CLI 的 `--no-gate` 跳过。
 
 **LLM 评语不在后端**：评测后端零 LLM 依赖、不接触任何 Key。教练对话/评语由
 前端浏览器直连 LLM 服务商——在网页「⚙ 设置」里自填协议（OpenAI/Anthropic 兼容）、
 Base URL、API Key、模型名，凭据只存本浏览器 localStorage。
 
-前端是纯静态单页（`web/index.html`，零外部依赖、可离线），默认调同源 API；
+前端是纯静态单页（`web/index.html`，JS 库全部本地 vendor、无 CDN 依赖），默认调同源 API；
 在「⚙ 设置」里可改成任意后端地址，网页可脱离服务器单独分发。
+内置 3D 教练形象（three.js + VRM，模型在 `web/assets/avatar.vrm`，
+为 VRM 官方示例模型 Alicia Solid）：评测时会根据分数做出表情反馈，
+朗读点评时口型同步（浏览器内置 TTS，可在侧栏关闭）；录音停止后先试听、
+确认发送或丢弃重录。
 
 ## 📊 输出说明
 
@@ -99,6 +107,8 @@ Base URL、API Key、模型名，凭据只存本浏览器 localStorage。
 ```jsonc
 {
   "duration_s": 25.0,
+  "singing": true,                   // 歌声门控结果；false 时带 message 直接返回
+  "gate": {"reason": "ok", "rms_db": -28.8, "voiced_ratio": 0.59, "longest_voiced_s": 1.9},
   "voiced_ratio": 0.62,              // 发声占比，过低说明可能没在唱
   "match": {
     "method": "name | humming | humming_unconfirmed | none",
@@ -116,7 +126,8 @@ Base URL、API Key、模型名，凭据只存本浏览器 localStorage。
     "stability": 3.1, "timbre": 3.6, "expression": 3.2, "overall": 3.4
   },
   "network_objective_fallback": {"pitch": 3.2, "rhythm": 3.5},  // 免参考兜底，交叉校验用
-  "segments": [{"start": 23.0, "end": 31.0, "abs_cents": 45, "lyric": "……"}],
+  "segments": [{"start_s": 23.0, "end_s": 31.0, "median_abs_cents": 45,
+                "in_tune_ratio": 0.6, "ref_time_s": 95.2, "lyric": "……"}],
   "warnings": ["……"]                  // 数据可信度提示，先看这个再看分
 }
 ```

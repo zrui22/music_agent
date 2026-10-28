@@ -21,14 +21,19 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web"
 
-app = FastAPI(title="Singing Coach Agent", version="1.0.0",
-              description="智能声乐评测 Agent：哼唱匹配 / 六维评分（LLM 由前端直连，不经后端）")
+app = FastAPI(title="Singing Coach Agent", version="1.1.0",
+              description="智能声乐评测 Agent：歌声门控 / 哼唱匹配 / 六维评分（LLM 由前端直连，不经后端）")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
+# 前端静态资源（3D 形象模型、three.js 本地 vendor）
+for sub in ("vendor", "assets"):
+    (WEB / sub).mkdir(parents=True, exist_ok=True)
+    app.mount(f"/{sub}", StaticFiles(directory=WEB / sub), name=sub)
 
 _scorer = None            # 评分模型单例（懒加载，启动不阻塞）
 _scorer_lock = threading.Lock()
