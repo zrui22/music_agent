@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 数据与模型资产（不入库，需单独获取）
+data/
+labels/
+models/
+*.wav
+*.mp3
+*.flac
+*.pt
+*.pth
+*.onnx
+
+# 实验记录
+wandb/
+runs/
+logs/
+*.log
+
+# 凭据（永不入库）
+.secrets/
+*.cookie
+cookies.txt
+
+# 系统
+.DS_Store
+Thumbs.db

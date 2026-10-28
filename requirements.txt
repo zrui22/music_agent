@@ -1,0 +1,8 @@
+numpy
+torch
+transformers
+soundfile
+praat-parselmouth
+rapidfuzz
+numba
+imageio-ffmpeg

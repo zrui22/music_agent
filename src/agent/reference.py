@@ -1,0 +1,189 @@
+"""参考曲库解析：歌名 -> 网易云原曲（音频+LRC+F0 曲线），磁盘缓存即曲库
+
+曲库策略：不预建大数据库。data/reference/ 下每首歌一个目录（训练期已积累
+数百首），Agent 按需现搜现建，缓存随使用自然增长。
+"""
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+
+from src.pitchref.netease import get_reference, REF_DIR
+from src.pitchref.f0 import extract_f0
+from src.utils.audio import to_wav
+
+
+def ensure_ref_wav(ref_dir: Path) -> Path | None:
+    """ref.mp3 -> ref.wav（缓存）。"""
+    wav = ref_dir / "ref.wav"
+    if wav.exists():
+        return wav
+    mp3 = ref_dir / "ref.mp3"
+    if mp3.exists() and to_wav(mp3, wav):
+        return wav
+    return None
+
+
+def ref_f0(ref_dir: Path):
+    """原曲 F0 曲线（npz 缓存）。返回 (times, midi, voiced) 或 None。"""
+    npz = ref_dir / "ref_f0.npz"
+    if npz.exists():
+        try:
+            d = np.load(npz)
+            return d["times"], d["midi"], d["voiced"]
+        except Exception:  # 并发写半成品/损坏：删掉重建
+            npz.unlink(missing_ok=True)
+    wav = ensure_ref_wav(ref_dir)
+    if wav is None:
+        return None
+    try:
+        t, m, v = extract_f0(str(wav))
+    except Exception:
+        return None
+    tmp = ref_dir / "ref_f0.tmp.npz"  # savez 只认 .npz 结尾不追加扩展名
+    np.savez_compressed(tmp, times=t, midi=m, voiced=v)
+    tmp.replace(npz)  # 原子替换，匹配侧不会读到半文件
+    return t, m, v
+
+
+def resolve_by_name(song: str, cover_dur_s: float = 0, interval: float = 1.0) -> dict | None:
+    """歌名 -> 参考（搜索/下载/缓存），并确保 ref.wav + F0 曲线就绪。"""
+    ref = get_reference(song, cover_dur_s=cover_dur_s, interval=interval)
+    if not ref:
+        return None
+    return _assemble(ref["dir"])
+
+
+def _assemble(ref_dir: Path) -> dict | None:
+    """ref 目录 -> {dir, song, artists, ref_id, lrc, f0}，F0 不可用时 None。"""
+    f0 = ref_f0(ref_dir)
+    if f0 is None:
+        return None
+    lrc = []
+    lp = ref_dir / "ref.lrc.json"
+    if lp.exists():
+        try:
+            lrc = json.loads(lp.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    meta = {}
+    mp = ref_dir / "meta.json"
+    if mp.exists():
+        try:
+            meta = json.loads(mp.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"dir": ref_dir, "song": meta.get("name"), "artists": meta.get("artists"),
+            "ref_id": meta.get("id"), "lrc": lrc, "f0": f0}
+
+
+def fetch_by_id(song_id: int, query: str, name: str, artists: str,
+                duration_s: float = 0) -> dict | None:
+    """按 id 落库一个参考版本（下载+歌词+F0），已缓存直接装配。"""
+    from src.pitchref.netease import download_audio, fetch_lyric
+    d = REF_DIR / str(song_id)
+    d.mkdir(parents=True, exist_ok=True)
+    if not (d / "ref.mp3").exists() and not download_audio(song_id, d / "ref.mp3"):
+        return None
+    mp = d / "meta.json"
+    if not mp.exists():
+        mp.write_text(json.dumps({"query": query, "id": song_id, "name": name,
+                                  "artists": artists, "duration_s": duration_s},
+                                 ensure_ascii=False), encoding="utf-8")
+    lp = d / "ref.lrc.json"
+    if not lp.exists():
+        try:
+            lp.write_text(json.dumps(fetch_lyric(song_id), ensure_ascii=False),
+                          encoding="utf-8")
+        except Exception:
+            pass
+    return _assemble(d)
+
+
+def _align_cost(cover_f0, ref_f0_tuple) -> tuple:
+    """cover 对某参考版本的对齐代价与有效帧数；失败返回 (inf, 0)。"""
+    from src.pitchref.align import estimate_key_shift, align_multi
+    c_t, c_m, c_v = cover_f0
+    r_t, r_m, r_v = ref_f0_tuple
+    try:
+        ks = estimate_key_shift(c_m, c_v, r_m, r_v)
+        view = align_multi(c_t, c_m - ks, c_v, r_t, r_m, r_v)
+    except Exception:
+        return float("inf"), 0, 0
+    if view is None or len(view.ct) < 100:
+        return float("inf"), 0, 0
+    n_tot = sum(n for _, n in view.seg_costs)
+    cost = sum(c * n for c, n in view.seg_costs) / max(n_tot, 1)
+    return float(cost), len(view.ct), int(ks)
+
+
+def resolve_best_version(song: str, cover_f0, cover_dur_s: float = 0,
+                         max_versions: int = 3, interval: float = 1.0) -> dict | None:
+    """同名多版本时逐一对齐，选代价最低的版本（实测决定性问题：同名不同歌/编曲）。
+
+    cover_f0 = (times, midi, voiced)。返回的 dict 多带 tried 列表记录各版本代价。
+    """
+    from src.pitchref.netease import search_song
+    try:
+        cands = search_song(song)
+    except Exception:
+        cands = []
+    exact = [c for c in cands if c["name"].strip() == song.strip()]
+    # 同名精确匹配优先，其次相关结果；已在库里的版本排最前（免下载）
+    def _in_lib(c):
+        return (REF_DIR / str(c["id"]) / "ref_f0.npz").exists()
+    pool = sorted(exact, key=lambda c: -int(_in_lib(c))) or cands
+    tried, best = [], None
+    for c in pool[:max_versions]:
+        ref = _assemble(REF_DIR / str(c["id"]))
+        if ref is None:
+            ref = fetch_by_id(c["id"], song, c["name"], c["artists"],
+                              c.get("duration_s", 0))
+            time.sleep(interval)
+        if ref is None:
+            continue
+        cost, n_frames, ks = _align_cost(cover_f0, ref["f0"])
+        tried.append({"ref_id": c["id"], "artists": c["artists"],
+                      "cost": round(cost, 3), "n_frames": n_frames})
+        if n_frames >= 100 and (best is None or cost < best[0]):
+            best = (cost, ks, ref)
+    if best is None:  # 全部对齐失败：退回首个可用版本（旧行为兜底）
+        for c in pool[:max_versions]:
+            ref = _assemble(REF_DIR / str(c["id"]))
+            if ref:
+                ref["tried"] = tried
+                ref["version_confidence"] = 0.2
+                return ref
+        return None
+    cost, ks, ref = best
+    ref["tried"] = tried
+    ref["version_confidence"] = round(max(0.0, min(1.0, (0.9 - cost) / 0.6)), 3)
+    return ref
+
+
+def library(require_cached_f0: bool = True) -> list:
+    """枚举缓存曲库，供哼唱匹配。
+
+    require_cached_f0=True：只收已有 ref_f0.npz 的参考（匹配侧要求快；
+    全库 F0 预建用 scripts/build_ref_f0_cache.py 离线跑）。
+    """
+    out = []
+    if not REF_DIR.exists():
+        return out
+    for d in sorted(REF_DIR.iterdir()):
+        mp = d / "meta.json"
+        if not mp.exists():
+            continue
+        if require_cached_f0 and not (d / "ref_f0.npz").exists():
+            continue
+        try:
+            meta = json.loads(mp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        f0 = ref_f0(d)
+        if f0 is None or f0[2].mean() < 0.15:
+            continue
+        out.append({"dir": d, "song": meta.get("name"), "artists": meta.get("artists"),
+                    "ref_id": meta.get("id"), "query": meta.get("query"), "f0": f0})
+    return out
