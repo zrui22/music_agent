@@ -81,14 +81,16 @@ PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 8900
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/health` | 模型/设备/LLM/曲库状态 |
+| `GET /api/health` | 模型/设备/曲库状态 |
 | `GET /api/library?q=` | 参考曲库检索（歌名补全） |
 | `POST /api/diagnose` | multipart 上传音频评测（可带 `song` / `auto_match`） |
-| `POST /api/chat` | 教练对话（带评测上下文） |
-| `POST /api/report` | 结构化评语报告 |
+
+**LLM 评语不在后端**：评测后端零 LLM 依赖、不接触任何 Key。教练对话/评语由
+前端浏览器直连 LLM 服务商——在网页「⚙ 设置」里自填协议（OpenAI/Anthropic 兼容）、
+Base URL、API Key、模型名，凭据只存本浏览器 localStorage。
 
 前端是纯静态单页（`web/index.html`，零外部依赖、可离线），默认调同源 API；
-在「⚙ API」里可改成任意后端地址，网页可脱离服务器单独分发。
+在「⚙ 设置」里可改成任意后端地址，网页可脱离服务器单独分发。
 
 ## 📊 输出说明
 
@@ -120,6 +122,9 @@ PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 8900
 ```
 
 ### LLM 导师评语（可选）
+
+> Web 前端无需此配置（在网页「⚙ 设置」里填 Key，浏览器直连）。
+> 以下为 Python API / CLI `chat.py` 的本机配置方式。
 
 ```python
 from src.agent.report import build_report

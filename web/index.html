@@ -192,7 +192,7 @@ canvas.radar{width:200px;height:200px}
         · 清唱 15 秒以上效果最好<br>
         · 指定歌名比自动匹配更可靠<br>
         · 音准/节奏是和原曲对齐算出的客观分；气息/音色/表现力是 AI 主观分<br>
-        · 评语由 LLM 生成，未配置后端时只显示分数
+        · 教练评语由你自己配置的 LLM 生成：Key 存在本浏览器，直连服务商，不经过评测后端
       </div>
     </div>
   </aside>
@@ -201,14 +201,28 @@ canvas.radar{width:200px;height:200px}
 <div id="toast"></div>
 <div id="settings">
   <div class="box">
-    <h2>⚙ API 设置</h2>
-    <label style="font-size:12px;color:var(--muted)">后端 API 地址（留空 = 同源）</label>
+    <h2>⚙ 设置</h2>
+    <label style="font-size:12px;color:var(--muted)">评测后端地址（留空 = 同源）</label>
     <input type="text" id="apiBaseInp" placeholder="http://服务器IP:8900">
+    <div style="border-top:1px solid var(--line);margin:6px 0 14px"></div>
+    <div style="font-size:13px;color:var(--gold);margin-bottom:8px">🤖 LLM 教练评语（可选，Key 只存在本浏览器，直连服务商，不经过评测后端）</div>
+    <label style="font-size:12px;color:var(--muted)">协议</label>
+    <select id="llmProto" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 12px;color:var(--ink);margin:6px 0 10px">
+      <option value="">不启用</option>
+      <option value="openai">OpenAI 兼容（/chat/completions）</option>
+      <option value="anthropic">Anthropic 兼容（/v1/messages）</option>
+    </select>
+    <label style="font-size:12px;color:var(--muted)">API 入口 Base URL</label>
+    <input type="text" id="llmBase" placeholder="https://api.openai.com/v1">
+    <label style="font-size:12px;color:var(--muted)">API Key</label>
+    <input type="password" id="llmKey" placeholder="sk-...">
+    <label style="font-size:12px;color:var(--muted)">模型名</label>
+    <input type="text" id="llmModel" placeholder="gpt-4o-mini / claude-sonnet 等">
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button class="iconbtn" onclick="closeSettings()">取消</button>
       <button class="cbtn primary" onclick="saveSettings()">保存</button>
     </div>
-    <div class="hint" style="margin-top:14px">Swagger API 文档：<code>{API地址}/docs</code>。接口：<code>GET /api/health</code> · <code>GET /api/library</code> · <code>POST /api/diagnose</code> · <code>POST /api/chat</code> · <code>POST /api/report</code></div>
+    <div class="hint" style="margin-top:14px">后端接口：<code>GET /api/health</code> · <code>GET /api/library</code> · <code>POST /api/diagnose</code>（Swagger 文档 <code>{后端}/docs</code>）<br>⚠ LLM Key 仅存于浏览器 localStorage，若用公共电脑请记得回来清空。</div>
   </div>
 </div>
 
@@ -245,6 +259,46 @@ let curSong = localStorage.getItem('curSong') || '';
 let lastDiag = null;
 let history = [];   // LLM 对话历史
 const LABELS = {pitch:'音准',rhythm:'节奏',stability:'气息稳定',timbre:'音色',expression:'表现力',overall:'综合'};
+
+/* ================= LLM 浏览器直连（Key 只存本机，不经过评测后端） ================= */
+const PERSONA = `你是一位经验丰富、鼓励为主的声乐教练「小嗓」。用户是业余唱歌爱好者。
+1. 回答声乐技巧、练声方法、选歌建议等问题，具体可执行，不空谈；
+2. 用户发来 [评测结果] JSON 时，翻译成通俗中文点评：先一句话总评，再逐维说问题（低于 3.5 的重点说），最后给 2-3 条本周练习建议；warnings 要如实转达；
+3. 语气亲切专业，像真人教练，用比喻，不暴露 JSON 字段名。分数均为 0-5 分制。`;
+
+function llmCfg(){
+  return { proto: localStorage.getItem('llm_proto')||'',
+           base: (localStorage.getItem('llm_base')||'').replace(/\/+$/,''),
+           key:  localStorage.getItem('llm_key')||'',
+           model:localStorage.getItem('llm_model')||'' };
+}
+function llmReady(){ const c=llmCfg(); return !!(c.proto && c.base && c.key); }
+
+async function llmDirect(messages){
+  const c = llmCfg();
+  if(!llmReady()) throw new Error('LLM 未配置：点右上角「⚙ API」填写协议/入口/Key');
+  const system = PERSONA +
+    (curSong ? `\n\n[当前上下文]\n用户当前练习曲目：《${curSong}》` : '');
+  let url, headers, body;
+  if(c.proto === 'openai'){
+    url = c.base + '/chat/completions';
+    headers = {'Content-Type':'application/json', 'Authorization':'Bearer '+c.key};
+    body = {model: c.model||'gpt-4o-mini', temperature:0.7, max_tokens:2048,
+            messages: [{role:'system',content:system}, ...messages]};
+  }else{
+    url = c.base + '/v1/messages';
+    headers = {'Content-Type':'application/json', 'x-api-key':c.key,
+               'anthropic-version':'2023-06-01',
+               'anthropic-dangerous-direct-browser-access':'true'};
+    body = {model: c.model||'claude-sonnet-4-5', max_tokens:2048,
+            system, messages};
+  }
+  const r = await fetch(url, {method:'POST', headers, body:JSON.stringify(body)});
+  const d = await r.json().catch(()=>null);
+  if(!r.ok) throw new Error('LLM HTTP '+r.status+'：'+((d&&(d.error?.message||d.message))||'请求失败').slice(0,120));
+  if(c.proto === 'openai') return d.choices[0].message.content;
+  return (d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
+}
 
 function setSong(s){
   curSong = s || '';
@@ -403,38 +457,34 @@ async function runDiagnose(blob, fname){
 function fnameSafe(n){ return n.replace(/[^\w.\-一-鿿]/g,'_'); }
 
 async function coachReview(diag){
+  if(!llmReady()){ addMsg('sys','点右上角「⚙ API」填入 LLM 配置后，这里会自动生成教练点评'); return; }
   const typing = addTyping();
   const content = '[评测结果] '+JSON.stringify(diag, (k,v)=>k==='segments'?undefined:v);
   try{
-    const d = await api('/api/chat', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({messages:[...history,{role:'user',content}], song:curSong||null, last_diag:diag})});
+    const reply = await llmDirect([...history.slice(-8), {role:'user',content}]);
     typing.remove();
-    history.push({role:'user',content:'（提交了一次演唱评测）'},{role:'assistant',content:d.reply});
-    addMsg('coach', mdLite(d.reply));
+    history.push({role:'user',content:'（提交了一次演唱评测）'},{role:'assistant',content:reply});
+    addMsg('coach', mdLite(reply));
   }catch(e){
     typing.remove();
-    if(String(e.message).includes('LLM')) addMsg('sys','未配置 LLM 后端，仅显示分数');
-    else toast('教练点评失败：'+e.message, true);
+    toast('教练点评失败：'+e.message, true);
   }
 }
 
 /* ================= 聊天 ================= */
 async function sendChat(text){
   addMsg('user', esc(text));
+  if(!llmReady()){ addMsg('sys','点右上角「⚙ API」填入 LLM 配置后即可对话'); return; }
   const typing = addTyping();
   history.push({role:'user', content:text});
   try{
-    const d = await api('/api/chat', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({messages:history.slice(-12), song:curSong||null, last_diag:lastDiag})});
+    const reply = await llmDirect(history.slice(-12));
     typing.remove();
-    history.push({role:'assistant', content:d.reply});
-    addMsg('coach', mdLite(d.reply));
+    history.push({role:'assistant', content:reply});
+    addMsg('coach', mdLite(reply));
   }catch(e){
     typing.remove();
-    if(String(e.message).includes('LLM')) addMsg('sys','未配置 LLM 后端：配置 CODEX_* 或 ANTHROPIC_* 环境变量后可用对话与评语');
-    else toast('对话失败：'+e.message, true);
+    toast('对话失败：'+e.message, true);
   }
 }
 
@@ -487,9 +537,22 @@ $('#songInp').addEventListener('input', e=>{
 });
 
 /* ================= 设置 ================= */
-function openSettings(){ $('#apiBaseInp').value = apiBase(); $('#settings').style.display='flex'; }
+function openSettings(){
+  $('#apiBaseInp').value = apiBase();
+  const c = llmCfg();
+  $('#llmProto').value = c.proto; $('#llmBase').value = c.base;
+  $('#llmKey').value = c.key; $('#llmModel').value = c.model;
+  $('#settings').style.display='flex';
+}
 function closeSettings(){ $('#settings').style.display='none'; }
-function saveSettings(){ localStorage.setItem('apiBase', $('#apiBaseInp').value.trim()); closeSettings(); toast('已保存，刷新状态…'); loadHealth(); }
+function saveSettings(){
+  localStorage.setItem('apiBase', $('#apiBaseInp').value.trim());
+  localStorage.setItem('llm_proto', $('#llmProto').value);
+  localStorage.setItem('llm_base', $('#llmBase').value.trim());
+  localStorage.setItem('llm_key', $('#llmKey').value.trim());
+  localStorage.setItem('llm_model', $('#llmModel').value.trim());
+  closeSettings(); toast('已保存，刷新状态…'); loadHealth();
+}
 $('#settings').addEventListener('click', e=>{ if(e.target.id==='settings') closeSettings(); });
 
 /* ================= 启动 ================= */
@@ -497,10 +560,10 @@ async function loadHealth(){
   try{
     const h = await api('/api/health');
     $('#bModel').className='badge ok';   $('#bModel').innerHTML='<span class="dot"></span>模型 就绪';
-    $('#bLLM').className='badge '+(h.llm?'ok':'warn'); $('#bLLM').innerHTML='<span class="dot"></span>LLM '+(h.llm?'在线':'未配置');
+    $('#bLLM').className='badge '+(llmReady()?'ok':'warn'); $('#bLLM').innerHTML='<span class="dot"></span>LLM '+(llmReady()?'已配置':'未配置');
     $('#bLib').className='badge ok';     $('#bLib').innerHTML=`<span class="dot"></span>曲库 ${h.library_size} 首`;
     $('#stModel').textContent='R3'; $('#stDev').textContent=h.device;
-    $('#stLib').textContent=h.library_size; $('#stLLM').textContent=h.llm?'在线':'未配置';
+    $('#stLib').textContent=h.library_size; $('#stLLM').textContent=llmReady()?'已配置':'未配置';
   }catch(e){
     $('#bModel').className='badge err'; $('#bModel').innerHTML='<span class="dot"></span>后端离线';
     toast('无法连接后端：'+e.message, true);
