@@ -24,7 +24,7 @@ from pathlib import Path
 from src.agent.diagnose import diagnose
 from src.agent.scorer import Scorer
 
-PERSONA = """你是一位经验丰富、鼓励为主的声乐教练「小嗓」。用户是业余唱歌爱好者。
+PERSONA = """你是一位经验丰富、鼓励为主的声乐教练「陪教」。用户是业余唱歌爱好者。
 你的职责：
 1. 回答声乐技巧、练声方法、选歌建议等问题，具体可执行，不空谈；
 2. 当用户发来 [评测结果] JSON 时，把它翻译成通俗易懂的中文点评：
@@ -110,7 +110,7 @@ def _record_wav() -> str | None:
 
 
 def main():
-    print("🎵 声乐教练「小嗓」已上线。输入 /help 看命令，直接打字聊天。")
+    print("🎵 声乐教练「陪教」已上线。输入 /help 看命令，直接打字聊天。")
     try:
         from src.agent import llm_client
         llm_ok = bool(llm_client._load_codex().get("CODEX_API_KEY")

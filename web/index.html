@@ -159,7 +159,7 @@ canvas.radar{width:200px;height:200px}
 <main>
   <section class="chat">
     <div class="stream" id="stream">
-      <div class="msg coach"><div class="who">声乐教练 · 小嗓</div>
+      <div class="msg coach"><div class="who">陪教 · 声乐教练</div>
         你好，我是你的声乐教练。🎵
         · 点下方 <strong>🎤 演唱</strong> 唱一段，或 <strong>📁 上传</strong> 音频文件，我来评测
         · 右侧可指定曲目（不知道唱什么就直接哼，我试着识别）
@@ -184,9 +184,9 @@ canvas.radar{width:200px;height:200px}
       <div class="switch"><input type="checkbox" id="autoReview" checked><label for="autoReview">评测后自动生成教练点评</label></div>
     </div>
     <div class="card">
-      <h3>🎙 教练小嗓</h3>
+      <h3>🎙 陪教</h3>
       <div id="avatarBox" style="border-radius:12px;overflow:hidden;background:radial-gradient(120% 90% at 50% 20%,#232738,#14161e);border:1px solid var(--line)">
-        <canvas id="avatarCv" style="width:100%;height:270px;display:block"></canvas>
+        <canvas id="avatarCv" style="width:100%;height:320px;display:block"></canvas>
       </div>
       <div id="avatarStatus" style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center">形象加载中…</div>
       <div class="switch"><input type="checkbox" id="ttsOn" checked><label for="ttsOn">语音朗读点评（浏览器 TTS）</label></div>
@@ -212,19 +212,22 @@ canvas.radar{width:200px;height:200px}
     <div style="border-top:1px solid var(--line);margin:6px 0 14px"></div>
     <div style="font-size:13px;color:var(--gold);margin-bottom:8px">🤖 LLM 教练评语（可选，Key 只存在本浏览器，直连服务商，不经过评测后端）</div>
     <label style="font-size:12px;color:var(--muted)">协议</label>
-    <select id="llmProto" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 12px;color:var(--ink);margin:6px 0 10px">
+    <select id="llmProto" onchange="updateLLMHint()" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 12px;color:var(--ink);margin:6px 0 10px">
       <option value="">不启用</option>
       <option value="openai">OpenAI 兼容（/chat/completions）</option>
       <option value="anthropic">Anthropic 兼容（/v1/messages）</option>
     </select>
+    <div id="llmHint" class="hint" style="margin:-4px 0 10px"></div>
     <label style="font-size:12px;color:var(--muted)">API 入口 Base URL</label>
     <input type="text" id="llmBase" placeholder="https://api.openai.com/v1">
     <label style="font-size:12px;color:var(--muted)">API Key</label>
     <input type="password" id="llmKey" placeholder="sk-...">
     <label style="font-size:12px;color:var(--muted)">模型名</label>
     <input type="text" id="llmModel" placeholder="gpt-4o-mini / claude-sonnet 等">
+    <div id="llmTestRes" style="font-size:12.5px;min-height:18px;margin:2px 0 8px"></div>
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button class="iconbtn" onclick="closeSettings()">取消</button>
+      <button class="cbtn" onclick="testLLM()" id="btnLLMTest">🔌 测试连接</button>
       <button class="cbtn primary" onclick="saveSettings()">保存</button>
     </div>
     <div class="hint" style="margin-top:14px">后端接口：<code>GET /api/health</code> · <code>GET /api/library</code> · <code>POST /api/diagnose</code>（Swagger 文档 <code>{后端}/docs</code>）<br>⚠ LLM Key 仅存于浏览器 localStorage，若用公共电脑请记得回来清空。</div>
@@ -266,7 +269,7 @@ let history = [];   // LLM 对话历史
 const LABELS = {pitch:'音准',rhythm:'节奏',stability:'气息稳定',timbre:'音色',expression:'表现力',overall:'综合'};
 
 /* ================= LLM 浏览器直连（Key 只存本机，不经过评测后端） ================= */
-const PERSONA = `你是一位经验丰富、鼓励为主的声乐教练「小嗓」。用户是业余唱歌爱好者。
+const PERSONA = `你是一位经验丰富、鼓励为主的声乐教练「陪教」。用户是业余唱歌爱好者。
 1. 回答声乐技巧、练声方法、选歌建议等问题，具体可执行，不空谈；
 2. 用户发来 [评测结果] JSON 时，翻译成通俗中文点评：先一句话总评，再逐维说问题（低于 3.5 的重点说），最后给 2-3 条本周练习建议；warnings 要如实转达；
 3. 语气亲切专业，像真人教练，用比喻，不暴露 JSON 字段名。分数均为 0-5 分制。`;
@@ -278,6 +281,15 @@ function llmCfg(){
            model:localStorage.getItem('llm_model')||'' };
 }
 function llmReady(){ const c=llmCfg(); return !!(c.proto && c.base && c.key); }
+function cfgHash(){ const c=llmCfg(); return c.proto+'|'+c.base+'|'+c.key+'|'+c.model; }
+function llmVerified(){ return llmReady() && localStorage.getItem('llm_verified')===cfgHash(); }
+function refreshLLMBadge(){
+  const b = $('#bLLM');
+  if(!b) return;
+  if(llmVerified()){ b.className='badge ok';   b.innerHTML='<span class="dot"></span>LLM 已连接'; }
+  else if(llmReady()){ b.className='badge warn'; b.innerHTML='<span class="dot"></span>LLM 未验证'; }
+  else { b.className='badge warn'; b.innerHTML='<span class="dot"></span>LLM 未配置'; }
+}
 
 async function llmDirect(messages){
   const c = llmCfg();
@@ -341,7 +353,7 @@ setTimeout(()=>{
 function addMsg(role, html){
   const d = document.createElement('div');
   d.className = 'msg '+role;
-  d.innerHTML = role==='coach' ? '<div class="who">声乐教练 · 小嗓</div>'+html : html;
+  d.innerHTML = role==='coach' ? '<div class="who">陪教 · 声乐教练</div>'+html : html;
   $('#stream').appendChild(d);
   d.scrollIntoView({behavior:'smooth', block:'end'});
   return d;
@@ -466,6 +478,7 @@ async function runDiagnose(blob, fname){
   const typing = addTyping();
   typing.innerHTML = '评测中（F0 提取 → 曲目匹配 → 神经评分）<i></i><i></i><i></i>';
   window.avatarAPI?.status('分析中：音高提取 → 匹配 → 评分…');
+  window.avatarAPI?.state('thinking');
   const fd = new FormData();
   fd.append('file', blob, fnameSafe(blob.name||'record.webm'));
   if(curSong) fd.append('song', curSong);
@@ -478,6 +491,7 @@ async function runDiagnose(blob, fname){
       addMsg('coach', esc(diag.message || '似乎没有检测到歌声，再试一次？') +
         `<div style="font-size:12px;color:var(--muted);margin-top:8px">响度 ${g.rms_db} dB · 发声占比 ${Math.round((g.voiced_ratio||0)*100)}% · 最长持续音 ${g.longest_voiced_s}s</div>`);
       window.avatarAPI?.react('confused');
+      window.avatarAPI?.state('idle');
       speakText(diag.message || '似乎没有检测到歌声，再试一次？');
       return;
     }
@@ -488,10 +502,12 @@ async function runDiagnose(blob, fname){
     const ov = (diag.subjective||{}).overall;
     window.avatarAPI?.react(typeof ov === 'number' ? ov : 3);
     window.avatarAPI?.status('评测完成');
+    window.avatarAPI?.state('idle');
     if($('#autoReview').checked) coachReview(diag);
   }catch(e){
     typing.remove();
     window.avatarAPI?.status('待命中');
+    window.avatarAPI?.state('idle');
     toast('评测失败：'+e.message, true);
   }
 }
@@ -501,6 +517,7 @@ async function coachReview(diag){
   if(!llmReady()){ addMsg('sys','点右上角「⚙ API」填入 LLM 配置后，这里会自动生成教练点评'); return; }
   const typing = addTyping();
   window.avatarAPI?.status('正在组织点评…');
+  window.avatarAPI?.state('thinking');
   const content = '[评测结果] '+JSON.stringify(diag, (k,v)=>k==='segments'?undefined:v);
   try{
     const reply = await llmDirect([...history.slice(-8), {role:'user',content}]);
@@ -509,9 +526,11 @@ async function coachReview(diag){
     addMsg('coach', mdLite(reply));
     speakText(reply);
     window.avatarAPI?.status('待命中');
+    window.avatarAPI?.state('idle');
   }catch(e){
     typing.remove();
     window.avatarAPI?.status('待命中');
+    window.avatarAPI?.state('idle');
     toast('教练点评失败：'+e.message, true);
   }
 }
@@ -552,6 +571,7 @@ async function toggleRec(){
     clearInterval(recTimer);
     $('#btnRec').classList.remove('on'); $('#btnRec').textContent='🎤 演唱';
     window.avatarAPI?.status('录音完成，等你确认发送');
+    window.avatarAPI?.state('idle');
     showRecPreview(blob, (Date.now()-recT0)/1000);
   };
   mediaRec.start();
@@ -559,6 +579,7 @@ async function toggleRec(){
   $('#btnRec').classList.add('on'); $('#btnRec').textContent='⏹ 0:00';
   recTimer = setInterval(()=>{ $('#btnRec').textContent='⏹ '+fmtDur((Date.now()-recT0)/1000); }, 250);
   window.avatarAPI?.status('正在聆听你的演唱…');
+  window.avatarAPI?.state('listening');
   toast('录音中，请开始演唱，再点一次结束');
 }
 function stopRec(){ if(mediaRec && mediaRec.state!=='inactive') mediaRec.stop(); }
@@ -609,21 +630,79 @@ $('#songInp').addEventListener('input', e=>{
 });
 
 /* ================= 设置 ================= */
+const LLM_HINTS = {
+  '': '不启用 LLM 时，评测功能不受影响，仅没有教练文字点评。',
+  openai: 'OpenAI 官方填 <code>https://api.openai.com/v1</code>；DeepSeek / 通义千问 / 月之暗面 / vLLM / Ollama 等「OpenAI 兼容」服务也选这项，填它们给的 Base URL（一般到 /v1 为止）。',
+  anthropic: 'Claude 官方填 <code>https://api.anthropic.com</code>；阿里云 MaaS 等 Anthropic 兼容端点，填到 <code>…/apps/anthropic</code> 为止（<b>不要</b>带 /v1）。',
+};
+function updateLLMHint(){
+  const el = $('#llmHint'); if(!el) return;
+  el.innerHTML = LLM_HINTS[$('#llmProto').value] || '';
+}
 function openSettings(){
   $('#apiBaseInp').value = apiBase();
   const c = llmCfg();
   $('#llmProto').value = c.proto; $('#llmBase').value = c.base;
   $('#llmKey').value = c.key; $('#llmModel').value = c.model;
+  $('#llmTestRes').textContent = '';
+  updateLLMHint();
   $('#settings').style.display='flex';
 }
 function closeSettings(){ $('#settings').style.display='none'; }
-function saveSettings(){
+function saveSettings(silent=false){
   localStorage.setItem('apiBase', $('#apiBaseInp').value.trim());
   localStorage.setItem('llm_proto', $('#llmProto').value);
   localStorage.setItem('llm_base', $('#llmBase').value.trim());
   localStorage.setItem('llm_key', $('#llmKey').value.trim());
   localStorage.setItem('llm_model', $('#llmModel').value.trim());
-  closeSettings(); toast('已保存，刷新状态…'); loadHealth();
+  refreshLLMBadge();
+  if(!silent){ closeSettings(); toast('已保存'); loadHealth(); }
+}
+/* 测试连接：成功才写 llm_verified，徽标变「已连接」 */
+async function testLLM(){
+  const res = $('#llmTestRes'), btn = $('#btnLLMTest');
+  const proto = $('#llmProto').value, base = $('#llmBase').value.trim().replace(/\/+$/,''),
+        key = $('#llmKey').value.trim(), model = $('#llmModel').value.trim();
+  const say = (html, ok) => { res.style.color = ok ? 'var(--teal)' : 'var(--red)'; res.innerHTML = html; };
+  if(!proto){ say('先在上方选择协议（OpenAI 兼容 / Anthropic 兼容）'); return; }
+  if(!base || !key){ say('Base URL 和 API Key 都要填'); return; }
+  btn.disabled = true; btn.textContent = '测试中…'; say('正在连接…', true);
+  const t0 = performance.now();
+  let url, headers, body;
+  if(proto === 'openai'){
+    url = base + '/chat/completions';
+    headers = {'Content-Type':'application/json', 'Authorization':'Bearer '+key};
+    body = {model: model||'gpt-4o-mini', max_tokens:1, messages:[{role:'user',content:'ping'}]};
+  }else{
+    url = base + '/v1/messages';
+    headers = {'Content-Type':'application/json', 'x-api-key':key,
+               'anthropic-version':'2023-06-01',
+               'anthropic-dangerous-direct-browser-access':'true'};
+    body = {model: model||'claude-sonnet-4-5', max_tokens:16, messages:[{role:'user',content:'ping'}]};
+  }
+  try{
+    const r = await fetch(url, {method:'POST', headers, body:JSON.stringify(body)});
+    const d = await r.json().catch(()=>null);
+    if(!r.ok){
+      const msg = (d && (d.error?.message || d.message)) || ('HTTP '+r.status);
+      say('✗ 连接失败（HTTP '+r.status+'）：'+esc(String(msg).slice(0,140)));
+      return;
+    }
+    const ms = Math.round(performance.now()-t0);
+    saveSettings(true);
+    localStorage.setItem('llm_verified', cfgHash());
+    refreshLLMBadge();
+    say('✓ 连接成功（'+ms+'ms），配置已保存');
+    toast('LLM 连接测试通过');
+  }catch(e){
+    // TypeError: Failed to fetch = 网络不通或被 CORS 拦截
+    const cors = /failed to fetch|networkerror|load failed/i.test(String(e && e.message || e));
+    say('✗ ' + (cors
+      ? '请求被拦截（多为该服务商未放行浏览器跨域 CORS）。可换支持浏览器直连的端点，或自建一层本地转发代理。'
+      : '连接异常：'+esc(String(e && e.message || e).slice(0,140))));
+  }finally{
+    btn.disabled = false; btn.textContent = '🔌 测试连接';
+  }
 }
 $('#settings').addEventListener('click', e=>{ if(e.target.id==='settings') closeSettings(); });
 
@@ -632,7 +711,7 @@ async function loadHealth(){
   try{
     const h = await api('/api/health');
     $('#bModel').className='badge ok';   $('#bModel').innerHTML='<span class="dot"></span>模型 就绪';
-    $('#bLLM').className='badge '+(llmReady()?'ok':'warn'); $('#bLLM').innerHTML='<span class="dot"></span>LLM '+(llmReady()?'已配置':'未配置');
+    refreshLLMBadge();
     $('#bLib').className='badge ok';     $('#bLib').innerHTML=`<span class="dot"></span>曲库 ${h.library_size} 首`;
   }catch(e){
     $('#bModel').className='badge err'; $('#bModel').innerHTML='<span class="dot"></span>后端离线';
@@ -662,12 +741,12 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 const cv = document.getElementById('avatarCv');
 const statusEl = document.getElementById('avatarStatus');
 const setStatus = t => { if (statusEl) statusEl.textContent = t; };
-window.avatarAPI = { ready: false, react(){}, status: setStatus };
+window.avatarAPI = { ready: false, react(){}, status: setStatus, state(){} };
 
 try {
   const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
-  const W = cv.clientWidth || 296, H = cv.clientHeight || 270;
+  const W = cv.clientWidth || 296, H = cv.clientHeight || 320;
   renderer.setSize(W, H, false);
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(26, W / H, 0.05, 30);
@@ -681,11 +760,20 @@ try {
     try { VRMUtils.removeUnnecessaryVertices(gltf.scene); VRMUtils.combineSkeletons(gltf.scene); } catch(e) {}
     if (String(vrm.meta?.metaVersion || '0') === '0') VRMUtils.rotateVRM0(vrm);
     scene.add(vrm.scene);
-    // 胸像取景（按模型包围盒自适应）
-    const box = new THREE.Box3().setFromObject(vrm.scene);
-    const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
-    camera.position.set(ctr.x, box.max.y - size.y * 0.16, ctr.z + size.y * 0.78);
-    camera.lookAt(ctr.x, box.max.y - size.y * 0.20, ctr.z);
+    /* 头肩胸取景：用头部骨骼定位（包围盒会被头发/裙摆撑大，导致人显小、偏移） */
+    vrm.scene.updateMatrixWorld(true);
+    let headBone = null;
+    try { headBone = vrm.humanoid.getBoneNode('head'); } catch(e) {}
+    if (headBone){
+      const hp = headBone.getWorldPosition(new THREE.Vector3());
+      camera.position.set(hp.x, hp.y + 0.03, hp.z + 1.02);
+      camera.lookAt(hp.x, hp.y - 0.16, hp.z);
+    } else {
+      const box = new THREE.Box3().setFromObject(vrm.scene);
+      const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+      camera.position.set(ctr.x, box.max.y - size.y * 0.16, ctr.z + size.y * 0.72);
+      camera.lookAt(ctr.x, box.max.y - size.y * 0.22, ctr.z);
+    }
     startAnim(vrm, renderer, scene, camera);
     setStatus('待命中 — 唱一段给我听吧');
   }, undefined, err => { console.warn('VRM 加载失败', err); setStatus('3D 形象加载失败（不影响评测）'); });
@@ -703,18 +791,30 @@ function startAnim(vrm, renderer, scene, camera){
     mouth: firstOf(['aa', 'a']), blink: firstOf(['blink']),
   };
   const bone = n => { try { return vrm.humanoid.getBoneNode(n); } catch(e) { return null; } };
-  const head = bone('head'), chest = bone('chest') || bone('upperChest');
+  const head = bone('head'), neck = bone('neck'), chest = bone('chest') || bone('upperChest');
 
-  let blinkAt = 1.5, blinking = 0, reactName = null, reactUntil = 0, shakeUntil = 0;
+  /* ---- 姿态状态机：待命 idle / 聆听 listening / 思考 thinking / 说话 speaking ----
+     每个状态给头/颈/胸的目标角度，每帧向目标平滑插值；speaking 由 TTS 自动切入 */
+  const POSES = {
+    idle:      { headX: 0.00, headY: 0.00, headZ: 0.00, chestX: 0.00, sway: 1.0 },
+    listening: { headX: 0.07, headY: 0.00, headZ: 0.10, chestX: 0.09, sway: 0.4 },  // 前倾+微侧头，专注听
+    thinking:  { headX: -0.10, headY: 0.18, headZ: 0.00, chestX: -0.02, sway: 1.6 }, // 微仰头+缓慢转头
+    speaking:  { headX: 0.02, headY: 0.00, headZ: 0.00, chestX: 0.03, sway: 0.8 },  // 叠加点头
+  };
+  let poseName = 'idle';
+  const cur = { ...POSES.idle };
+
+  let blinkAt = 1.5, blinking = 0, reactName = null, reactUntil = 0, shakeUntil = 0, nodUntil = 0;
   const clock = new THREE.Clock();
 
   window.avatarAPI = {
     ready: true,
     status: setStatus,
+    state(name){ if (POSES[name]) poseName = name; },
     react(kind){
       // kind: 综合分（0-5）或 'confused'（没听清）
       if (kind === 'confused'){ reactName = EXPR.surprised || null; shakeUntil = performance.now() / 1000 + 1.1; }
-      else if (kind >= 4) reactName = EXPR.happy;
+      else if (kind >= 4){ reactName = EXPR.happy; nodUntil = performance.now() / 1000 + 1.6; }
       else if (kind >= 3) reactName = EXPR.relaxed;
       else reactName = EXPR.sad;
       reactUntil = performance.now() / 1000 + 4;
@@ -725,6 +825,10 @@ function startAnim(vrm, renderer, scene, camera){
     requestAnimationFrame(loop);
     const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
     const now = performance.now() / 1000;
+    const speaking = !!window.avatarSpeaking;
+    const target = POSES[speaking ? 'speaking' : poseName];
+    const k = Math.min(1, dt * 4.5);
+    for (const p of Object.keys(target)) cur[p] += (target[p] - cur[p]) * k;
     // 眨眼
     blinkAt -= dt;
     if (blinkAt <= 0){ blinking = 0.14; blinkAt = 2.2 + Math.random() * 3.6; }
@@ -736,16 +840,23 @@ function startAnim(vrm, renderer, scene, camera){
     for (const n of [EXPR.happy, EXPR.sad, EXPR.relaxed, EXPR.surprised])
       expr(n, n === reactName && active ? 0.9 : 0);
     if (reactName && !active) reactName = null;
-    // 口型：TTS 朗读时快速开合（幅度带抖动更自然）
-    expr(EXPR.mouth, window.avatarSpeaking
-      ? 0.25 + 0.6 * Math.abs(Math.sin(t * 12 + Math.sin(t * 7)))
-      : 0);
-    // 呼吸、微转头；confused 时摇头
-    if (chest) chest.rotation.x = 0.025 * Math.sin(t * 1.5);
+    // 口型：TTS 朗读时快速开合（双层正弦抖动更自然）
+    expr(EXPR.mouth, speaking ? Math.abs(Math.sin(t * 11)) * (0.55 + 0.45 * Math.sin(t * 3.7)) * 0.9 : 0);
+    // 呼吸 + 姿态
+    if (chest) chest.rotation.x = cur.chestX + 0.025 * Math.sin(t * 1.5);
     if (head){
-      if (now < shakeUntil){ head.rotation.y = 0.22 * Math.sin(t * 9); head.rotation.x = 0.05; }
-      else { head.rotation.y = 0.07 * Math.sin(t * 0.45); head.rotation.x = 0.035 * Math.sin(t * 0.8); }
+      if (now < shakeUntil){          // confused：摇头
+        head.rotation.y = 0.22 * Math.sin(t * 9);
+        head.rotation.x = 0.05;
+      } else {
+        head.rotation.y = cur.headY + 0.06 * cur.sway * Math.sin(t * 0.45);
+        head.rotation.x = cur.headX + 0.03 * cur.sway * Math.sin(t * 0.8);
+        if (speaking) head.rotation.x += 0.035 * Math.sin(t * 2.3);   // 说话点头
+        if (now < nodUntil) head.rotation.x += 0.09 * Math.abs(Math.sin(t * 5)); // 高分：开心点头
+      }
+      head.rotation.z = cur.headZ;
     }
+    if (neck) neck.rotation.y = 0.04 * cur.sway * Math.sin(t * 0.3);
     vrm.update(dt);
     renderer.render(scene, camera);
   })();

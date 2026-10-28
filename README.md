@@ -50,7 +50,7 @@ PYTHONPATH=. python src/agent/diagnose.py 我唱的.wav --no-match
 PYTHONPATH=. python src/agent/diagnose.py 我唱的.wav -o result.json
 ```
 
-## 💬 对话模式（教练「小嗓」）
+## 💬 对话模式（教练「陪教」）
 
 运行后进入对话：直接打字聊声乐问题；`/sing` 对麦克风唱一段自动评测；
 `/file` 评测本地音频；LLM 会把分数翻译成教练评语。
