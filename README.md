@@ -4,7 +4,7 @@
 
 **唱一段，AI 告诉你：音准差多少音分、哪句拖拍、气息稳不稳、该怎么练。**
 
-[功能](#-功能) • [安装](#-安装) • [快速开始](#-快速开始) • [输出说明](#-输出说明) • [模型资产](#-模型资产) • [FAQ](#-faq)
+[功能](#-功能) • [安装](#-安装) • [快速开始](#-快速开始) • [输出说明](#-输出说明) • [模型与训练数据](#-模型与训练数据) • [模型资产](#-模型资产) • [FAQ](#-faq)
 
 </div>
 
@@ -155,15 +155,74 @@ export CODEX_BASE_URL=... CODEX_API_KEY=... CODEX_MODEL=...
 export ANTHROPIC_BASE_URL=... ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=...
 ```
 
+## 🧠 模型与训练数据
+
+**模型**（`singing_scorer_v1.pt`，Release 分发，fp16 186M）：
+
+- 主干：[MERT-v1-95M](https://huggingface.co/m-a-p/MERT-v1-95M) 音乐理解预训练编码器
+  （冻结卷积特征提取器与前 6 层，可训练 47.2M 参数）
+- 融合：5 路专家特征组（韵律 / 音色质噪 / 参考对齐 / 实时评论流统计 / 名气协变量）
+  各经 MLP 投影为 token，音频摘要作 query 做 cross-attention 互相整合；
+  缺失组用可学习 null token 兜底（融合与头部 2.8M 参数）
+- 输出：6 个独立评分头（音准/节奏/气息稳定/音色/表现力/综合），sigmoid×5 → 0–5 分
+
+**训练数据**（自建弱监督数据集，仅用于研究训练，不随仓库/Release 分发）：
+
+| 标签轨 | 规模 | 监督方式 |
+|---|---|---|
+| 大众文本评价弱标签 | ~10,000 切片 | LLM 清洗后广播到媒体级（conf 0.4–0.9） |
+| 在线 K 歌平台 | ~3,200 切片 | 平台机打分分位映射（低权重）+ 文本标签 |
+| 专家点评精标 | ~3,500 演唱段 | LLM 精标（高置信，0.85×pair_conf） |
+| 算法真值（全轨覆盖） | 全部样本 | 参考对齐 pitch_ref / 逐字时间戳 rhythm_ref |
+
+共 15,417 个演唱切片（train 14,509 / val 908，按来源 ID 哈希 85/7.5/7.5 划分防泄漏），
+三轨按标签置信度分层加权（w=conf）。素材来自公开网络演唱内容及配套公开评价，
+为对冲"捧场偏差"定向补充了普通人演唱与翻车现场负样本（低分段占比 11%）。
+
+**验证集表现**（Spearman 等级相关；文本弱监督主观维度的信息上限约 0.4–0.5）：
+
+| 音准 | 节奏 | 气息稳定 | 音色 | 综合 | 表现力 |
+|---|---|---|---|---|---|
+| 0.76 | 0.73 | 0.60 | 0.50 | 0.47 | 0.42 |
+
+因此产品形态上：**音准/节奏以算法客观真值直出为准，网络负责气息/音色/表现力等
+主观维度**——整体诊断精度高于任何单一网络输出。
+
 ## 🗂 模型资产（仓库不包含，从 Release 下载）
+
+评分运行需要三件资产（共约 300M），托管在
+[Release v1.0.0](https://github.com/zrui22/music_agent/releases/tag/v1.0.0)：
+
+| 文件 | 大小 | md5 | 说明 |
+|---|---|---|---|
+| `singing_scorer_v1.pt` | 186M | `0b4a29d38c6fa34eecfd8953b234fdf3` | 评分网络权重（fp16），Scorer 默认加载 |
+| `feat_stats.json` | 4K | `1ff0e372bddaef22a6732074c25b9578` | 专家特征 z-score 归一化统计（必需） |
+| `reference_lib_v1.tar.gz` | 110M | `da47e8fdce94e5ce493ef9bf74efa490` | 参考曲库 845 首（meta + 逐字歌词 + F0 曲线） |
 
 ```bash
 mkdir -p models data
-REL=https://github.com/<OWNER>/music_agent/releases/download/v1.0.0
-wget -O models/singing_scorer_v1.pt $REL/singing_scorer_v1.pt   # 186M 评分网络权重(fp16)
-wget -O models/feat_stats.json      $REL/feat_stats.json        # 4K  特征归一化统计(必需)
-wget -O- $REL/reference_lib_v1.tar.gz | tar xz -C data/         # 110M 参考曲库845首(meta+歌词+F0)
-# MERT 编码器(361M)无需手动下载，首次运行自动从 HuggingFace m-a-p/MERT-v1-95M 拉取
+REL=https://github.com/zrui22/music_agent/releases/download/v1.0.0
+
+# 1) 评分权重 + 归一化统计（wget -c 支持断点续传）
+wget -c -O models/singing_scorer_v1.pt $REL/singing_scorer_v1.pt
+wget -c -O models/feat_stats.json      $REL/feat_stats.json
+
+# 2) 参考曲库：下载 → 校验 → 解压到 data/（生成 data/reference/<id>/）
+wget -c -O /tmp/reference_lib_v1.tar.gz $REL/reference_lib_v1.tar.gz
+echo "da47e8fdce94e5ce493ef9bf74efa490  /tmp/reference_lib_v1.tar.gz" | md5sum -c -
+tar xzf /tmp/reference_lib_v1.tar.gz -C data/
+
+# 3) 可选：校验权重完整性
+echo "0b4a29d38c6fa34eecfd8953b234fdf3  models/singing_scorer_v1.pt" | md5sum -c -
+echo "1ff0e372bddaef22a6732074c25b9578  models/feat_stats.json"      | md5sum -c -
+```
+
+MERT 编码器（361M）不在 Release 里，首次运行自动从 HuggingFace
+[`m-a-p/MERT-v1-95M`](https://huggingface.co/m-a-p/MERT-v1-95M) 拉取并缓存到
+`models/MERT-v1-95M/`。国内网络拉不动时先设镜像再启动：
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
 ```
 
 资产布局：
