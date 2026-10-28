@@ -73,10 +73,10 @@ PYTHONPATH=. python src/agent/chat.py
 ## 🌐 Web 服务（前端 + REST API）
 
 ```bash
-PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 8900
+PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 9527
 ```
 
-浏览器打开 `http://localhost:8900` 即得完整前端：🎤 麦克风演唱、📁 文件上传评测、
+浏览器打开 `http://localhost:9527` 即得完整前端：🎤 麦克风演唱、📁 文件上传评测、
 曲目补全、六维雷达图、教练对话。交互式 API 文档在 `/docs`。
 
 | 接口 | 说明 |

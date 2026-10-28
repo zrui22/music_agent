@@ -1,7 +1,7 @@
 """声乐评测 Agent Web 服务（FastAPI）
 
 启动：
-    PYTHONPATH=. .venv/bin/uvicorn src.server.app:app --host 0.0.0.0 --port 8900
+    PYTHONPATH=. .venv/bin/uvicorn src.server.app:app --host 0.0.0.0 --port 9527
 
 API：
     GET  /api/health     服务状态（模型/设备/曲库规模）
