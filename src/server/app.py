@@ -135,12 +135,12 @@ async def llm_relay(req: Request):
     if proto == "openai":
         url = base + "/chat/completions"
         headers = {"Authorization": "Bearer " + key}
-        payload = {"model": model or "gpt-4o-mini", "temperature": 0.7, "max_tokens": 2048,
+        payload = {"model": model or "gpt-4o-mini", "temperature": 0.7, "max_tokens": 4096,
                    "messages": ([{"role": "system", "content": system}] if system else []) + messages}
     else:
         url = base + "/v1/messages"
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
-        payload = {"model": model or "claude-sonnet-4-5", "max_tokens": 2048,
+        payload = {"model": model or "claude-sonnet-4-5", "max_tokens": 4096,
                    "system": system, "messages": messages}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as cli:

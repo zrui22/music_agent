@@ -232,6 +232,7 @@ canvas.radar{width:200px;height:200px}
     <input type="text" id="llmModel" placeholder="gpt-4o-mini / claude-sonnet 等">
     <div id="llmTestRes" style="font-size:12.5px;min-height:18px;margin:2px 0 8px"></div>
     <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button class="iconbtn" onclick="clearMemory()" title="清空本机保存的对话上下文（不影响 LLM 配置）">🧹 清空记忆</button>
       <button class="iconbtn" onclick="closeSettings()">取消</button>
       <button class="cbtn" onclick="testLLM()" id="btnLLMTest">🔌 测试连接</button>
       <button class="cbtn primary" onclick="saveSettings()">保存</button>
@@ -271,7 +272,10 @@ function mdLite(s){
 /* ================= 状态 ================= */
 let curSong = localStorage.getItem('curSong') || '';
 let lastDiag = null;
-let history = [];   // LLM 对话历史
+let history = [];   // LLM 对话历史（持久化在本机 localStorage，刷新页面不丢）
+try{ const h = JSON.parse(localStorage.getItem('chat_history')||'[]'); if(Array.isArray(h)) history = h; }catch(e){}
+function saveHistory(){ try{ localStorage.setItem('chat_history', JSON.stringify(history.slice(-30))); }catch(e){} }
+function clearMemory(){ history = []; saveHistory(); toast('对话记忆已清空'); }
 const LABELS = {pitch:'音准',rhythm:'节奏',stability:'气息稳定',timbre:'音色',expression:'表现力',overall:'综合'};
 
 /* ================= LLM 调用（默认经评测后端无状态中转，Key 只存本机、后端不落地；后端不可达时回退浏览器直连） ================= */
@@ -310,14 +314,14 @@ async function llmFetch(c, system, messages, mode){
   if(c.proto === 'openai'){
     url = c.base + '/chat/completions';
     headers = {'Content-Type':'application/json', 'Authorization':'Bearer '+c.key};
-    body = {model: c.model||'gpt-4o-mini', temperature:0.7, max_tokens:2048,
+    body = {model: c.model||'gpt-4o-mini', temperature:0.7, max_tokens:4096,
             messages: [{role:'system',content:system}, ...messages]};
   }else{
     url = c.base + '/v1/messages';
     headers = {'Content-Type':'application/json', 'x-api-key':c.key,
                'anthropic-version':'2023-06-01',
                'anthropic-dangerous-direct-browser-access':'true'};
-    body = {model: c.model||'claude-sonnet-4-5', max_tokens:2048,
+    body = {model: c.model||'claude-sonnet-4-5', max_tokens:4096,
             system, messages};
   }
   const r = await fetch(url, {method:'POST', headers, body:JSON.stringify(body)});
@@ -571,11 +575,16 @@ async function coachReview(diag){
   const typing = addTyping();
   window.avatarAPI?.status('正在组织点评…');
   window.avatarAPI?.state('thinking');
-  const content = '[评测结果] '+JSON.stringify(diag, (k,v)=>k==='segments'?undefined:v);
+  // 评测 JSON 完整入历史（约 1-2KB）——后续追问才能记得住分数；audio 是服务器临时路径，不发给外部 LLM
+  const content = '[评测结果] '+JSON.stringify(diag, (k,v)=>(k==='segments'||k==='audio')?undefined:v);
+  history.push({role:'user', content});
+  saveHistory();
   try{
-    const reply = await llmChat([...history.slice(-8), {role:'user',content}]);
+    const reply = await llmChat(history.slice(-10));
     typing.remove();
-    history.push({role:'user',content:'（提交了一次演唱评测）'},{role:'assistant',content:reply});
+    if(!reply || !reply.trim()) throw new Error('LLM 返回了空内容：模型名可能不正确、无权限，或输出被截断（请到「⚙ API」核对模型名）');
+    history.push({role:'assistant', content:reply});
+    saveHistory();
     addMsg('coach', mdLite(reply));
     speakText(reply);
     window.avatarAPI?.status('待命中');
@@ -584,7 +593,7 @@ async function coachReview(diag){
     typing.remove();
     window.avatarAPI?.status('待命中');
     window.avatarAPI?.state('idle');
-    toast('教练点评失败：'+e.message, true);
+    addMsg('sys','⚠ 教练点评生成失败：'+esc(e.message)+'<br><span style="font-size:12px;color:var(--muted)">评测数据已留在对话记忆里，修复配置后对我说「再点评一次」即可</span>');
   }
 }
 
@@ -594,10 +603,13 @@ async function sendChat(text){
   if(!llmReady()){ addMsg('sys','点右上角「⚙ API」填入 LLM 配置后即可对话'); return; }
   const typing = addTyping();
   history.push({role:'user', content:text});
+  saveHistory();
   try{
     const reply = await llmChat(history.slice(-12));
     typing.remove();
+    if(!reply || !reply.trim()) throw new Error('LLM 返回了空内容：模型名可能不正确或输出被截断（请到「⚙ API」核对模型名）');
     history.push({role:'assistant', content:reply});
+    saveHistory();
     addMsg('coach', mdLite(reply));
     speakText(reply);
   }catch(e){
@@ -741,9 +753,13 @@ async function testLLM(){
     // 1) 默认路径：后端无状态中转（不受浏览器 CORS 限制）
     say('正在经后端中转连接…', true);
     try{
-      await api('/api/llm/relay', {method:'POST', headers:{'Content-Type':'application/json'},
+      const d = await api('/api/llm/relay', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({proto, base, key, model, system:'ping',
                               messages:[{role:'user',content:'ping'}]})});
+      if(!String(d && d.text || '').trim()){
+        say('✗ 连接失败：上游返回了空内容——模型名很可能不正确或无权限（请按服务商文档核对模型名）');
+        return;
+      }
       pass('后端中转');
       return;
     }catch(e){
@@ -761,19 +777,26 @@ async function testLLM(){
     if(proto === 'openai'){
       url = base + '/chat/completions';
       headers = {'Content-Type':'application/json', 'Authorization':'Bearer '+key};
-      body = {model: model||'gpt-4o-mini', max_tokens:1, messages:[{role:'user',content:'ping'}]};
+      body = {model: model||'gpt-4o-mini', max_tokens:16, messages:[{role:'user',content:'ping'}]};
     }else{
       url = base + '/v1/messages';
       headers = {'Content-Type':'application/json', 'x-api-key':key,
                  'anthropic-version':'2023-06-01',
                  'anthropic-dangerous-direct-browser-access':'true'};
-      body = {model: model||'claude-sonnet-4-5', max_tokens:16, messages:[{role:'user',content:'ping'}]};
+      body = {model: model||'claude-sonnet-4-5', max_tokens:128, messages:[{role:'user',content:'ping'}]};
     }
     const r = await fetch(url, {method:'POST', headers, body:JSON.stringify(body)});
     const d = await r.json().catch(()=>null);
     if(!r.ok){
       const msg = (d && (d.error?.message || d.message)) || ('HTTP '+r.status);
       say('✗ 连接失败（HTTP '+r.status+'）：'+esc(String(msg).slice(0,140)));
+      return;
+    }
+    const txt = proto==='openai'
+      ? (d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content || '')
+      : (d && (d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('') || '');
+    if(!String(txt).trim()){
+      say('✗ 连接失败：上游返回了空内容——模型名很可能不正确或无权限（请按服务商文档核对模型名）');
       return;
     }
     pass('浏览器直连');
