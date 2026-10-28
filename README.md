@@ -70,6 +70,26 @@ PYTHONPATH=. python src/agent/chat.py
 `/file` 不受影响（`conda install -c conda-forge portaudio` 可补齐）。
 未配置 LLM 后端时进入纯命令模式，只出分数表。
 
+## 🌐 Web 服务（前端 + REST API）
+
+```bash
+PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 8900
+```
+
+浏览器打开 `http://localhost:8900` 即得完整前端：🎤 麦克风演唱、📁 文件上传评测、
+曲目补全、六维雷达图、教练对话。交互式 API 文档在 `/docs`。
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/health` | 模型/设备/LLM/曲库状态 |
+| `GET /api/library?q=` | 参考曲库检索（歌名补全） |
+| `POST /api/diagnose` | multipart 上传音频评测（可带 `song` / `auto_match`） |
+| `POST /api/chat` | 教练对话（带评测上下文） |
+| `POST /api/report` | 结构化评语报告 |
+
+前端是纯静态单页（`web/index.html`，零外部依赖、可离线），默认调同源 API；
+在「⚙ API」里可改成任意后端地址，网页可脱离服务器单独分发。
+
 ## 📊 输出说明
 
 `diagnose` 输出结构化 JSON：

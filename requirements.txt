@@ -7,3 +7,6 @@ rapidfuzz
 numba
 imageio-ffmpeg
 sounddevice
+fastapi
+uvicorn[standard]
+python-multipart

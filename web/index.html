@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>声诊 · Singing Coach</title>
+<style>
+:root{
+  --bg:#0e0f14; --panel:#161820; --panel2:#1d2029; --line:#2b2f3c;
+  --ink:#ece9e2; --muted:#8f93a3; --gold:#e0a458; --gold-soft:rgba(224,164,88,.14);
+  --teal:#57c7b2; --teal-soft:rgba(87,199,178,.12); --red:#e06c75; --red-soft:rgba(224,108,117,.12);
+  --serif:"Noto Serif SC","Songti SC","STSong","SimSun",serif;
+  --sans:-apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+  --r:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--ink); font-family:var(--sans); font-size:15px;
+  background-image:
+    radial-gradient(900px 500px at 85% -10%, rgba(224,164,88,.07), transparent 60%),
+    radial-gradient(700px 500px at -10% 110%, rgba(87,199,178,.06), transparent 60%);
+  display:flex; flex-direction:column; overflow:hidden;
+}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#333848;border-radius:4px}
+button{font-family:inherit;cursor:pointer}
+input,select{font-family:inherit}
+
+/* ---------- Header ---------- */
+header{
+  display:flex;align-items:center;gap:14px;padding:14px 22px;
+  border-bottom:1px solid var(--line);background:rgba(14,15,20,.85);
+  backdrop-filter:blur(8px);flex:none;
+}
+.logo{font-family:var(--serif);font-size:22px;letter-spacing:2px}
+.logo b{color:var(--gold);font-weight:600}
+.logo small{font-size:11px;color:var(--muted);letter-spacing:4px;margin-left:8px;font-family:var(--sans)}
+.badges{margin-left:auto;display:flex;gap:8px;align-items:center}
+.badge{font-size:12px;padding:4px 10px;border-radius:99px;border:1px solid var(--line);color:var(--muted);display:flex;gap:6px;align-items:center}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:#666}
+.badge.ok .dot{background:var(--teal);box-shadow:0 0 6px var(--teal)}
+.badge.warn .dot{background:var(--gold)}
+.badge.err .dot{background:var(--red)}
+.iconbtn{background:none;border:1px solid var(--line);color:var(--muted);border-radius:10px;padding:6px 12px;font-size:13px;transition:.2s}
+.iconbtn:hover{border-color:var(--gold);color:var(--gold)}
+
+/* ---------- Layout ---------- */
+main{flex:1;display:grid;grid-template-columns:1fr 340px;gap:0;min-height:0}
+@media(max-width:900px){main{grid-template-columns:1fr}.side{display:none}}
+
+/* ---------- Chat ---------- */
+.chat{display:flex;flex-direction:column;min-height:0}
+.stream{flex:1;overflow-y:auto;padding:24px 28px;display:flex;flex-direction:column;gap:16px}
+.msg{max-width:82%;padding:12px 16px;border-radius:var(--r);line-height:1.75;white-space:pre-wrap;word-break:break-word;animation:rise .25s ease}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1}}
+.msg.user{align-self:flex-end;background:linear-gradient(135deg,#2a2f42,#232636);border:1px solid #333a4f;border-bottom-right-radius:4px}
+.msg.coach{align-self:flex-start;background:var(--panel);border:1px solid var(--line);border-bottom-left-radius:4px}
+.msg.coach .who{font-family:var(--serif);color:var(--gold);font-size:13px;margin-bottom:6px;letter-spacing:1px}
+.msg.sys{align-self:center;background:none;border:1px dashed var(--line);color:var(--muted);font-size:12.5px;padding:6px 14px;border-radius:99px}
+.msg h1,.msg h2,.msg h3{font-family:var(--serif);margin:10px 0 4px;font-size:16px;color:var(--gold)}
+.msg ul{padding-left:20px}.msg li{margin:3px 0}
+.msg strong{color:var(--gold)}
+.msg code{background:#0008;padding:1px 6px;border-radius:5px;font-size:13px}
+.typing{align-self:flex-start;color:var(--muted);padding:8px 16px;font-size:13px}
+.typing i{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--gold);margin:0 2px;animation:blink 1s infinite}
+.typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,100%{opacity:.25}50%{opacity:1}}
+
+/* ---------- Eval card ---------- */
+.eval{align-self:stretch;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;animation:rise .3s ease}
+.eval-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.eval-head .song{font-family:var(--serif);font-size:19px;color:var(--gold)}
+.eval-head .conf{font-size:12px;color:var(--muted)}
+.eval-head .overall{margin-left:auto;font-family:var(--serif);font-size:30px;color:var(--teal)}
+.eval-head .overall small{font-size:12px;color:var(--muted);font-family:var(--sans)}
+.eval-body{display:grid;grid-template-columns:200px 1fr;gap:18px;margin-top:12px;align-items:center}
+@media(max-width:640px){.eval-body{grid-template-columns:1fr}}
+canvas.radar{width:200px;height:200px}
+.bars{display:flex;flex-direction:column;gap:7px}
+.bar-row{display:grid;grid-template-columns:64px 1fr 38px;gap:10px;align-items:center;font-size:13px}
+.bar-row .name{color:var(--muted);font-size:13px}
+.bar{height:8px;background:#262a36;border-radius:4px;overflow:hidden}
+.bar i{display:block;height:100%;border-radius:4px;width:0;transition:width 1s cubic-bezier(.2,.8,.2,1)}
+.bar-row .val{text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
+.warns{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+.warn{font-size:12.5px;color:#e8c07a;background:var(--gold-soft);border-left:3px solid var(--gold);padding:6px 10px;border-radius:0 8px 8px 0}
+.segs{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.segs h4{font-size:12.5px;color:var(--muted);font-weight:500;margin-bottom:6px}
+.seg{font-size:12.5px;color:var(--muted);padding:3px 0;display:flex;gap:8px}
+.seg .t{color:var(--teal);font-variant-numeric:tabular-nums}
+.seg .cents.bad{color:var(--red)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.chip{font-size:12px;padding:4px 12px;border-radius:99px;border:1px solid var(--line);background:none;color:var(--muted);transition:.15s}
+.chip:hover{border-color:var(--teal);color:var(--teal)}
+.eval .actions{margin-top:12px;display:flex;gap:8px}
+
+/* ---------- Composer ---------- */
+.composer{flex:none;border-top:1px solid var(--line);padding:14px 22px;display:flex;gap:10px;align-items:center;background:rgba(22,24,32,.7)}
+.composer input[type=text]{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:11px 15px;color:var(--ink);font-size:15px;outline:none;transition:.2s}
+.composer input[type=text]:focus{border-color:var(--gold)}
+.cbtn{border:1px solid var(--line);background:var(--panel2);color:var(--muted);border-radius:11px;padding:10px 14px;font-size:15px;transition:.2s;white-space:nowrap}
+.cbtn:hover{border-color:var(--gold);color:var(--gold)}
+.cbtn.primary{background:var(--gold);border-color:var(--gold);color:#1a1206;font-weight:600}
+.cbtn.primary:hover{filter:brightness(1.1)}
+.cbtn.rec{border-color:var(--red);color:var(--red)}
+.cbtn.rec.on{background:var(--red);color:#fff;animation:pulse 1.2s infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 6px rgba(224,108,117,.18)}}
+#songChip{font-size:12px;color:var(--teal);border:1px dashed rgba(87,199,178,.4);padding:6px 12px;border-radius:99px;background:var(--teal-soft);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---------- Side panel ---------- */
+.side{border-left:1px solid var(--line);background:rgba(22,24,32,.5);padding:20px;overflow-y:auto;display:flex;flex-direction:column;gap:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px}
+.card h3{font-family:var(--serif);font-size:15px;color:var(--gold);margin-bottom:12px;letter-spacing:1px;font-weight:600}
+.card label{font-size:12px;color:var(--muted);display:block;margin:10px 0 5px}
+.card input[type=text]{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 11px;color:var(--ink);font-size:14px;outline:none}
+.card input[type=text]:focus{border-color:var(--teal)}
+.ac-list{border:1px solid var(--line);border-radius:9px;margin-top:4px;overflow:hidden;display:none}
+.ac-list div{padding:7px 11px;font-size:13px;cursor:pointer;color:var(--muted)}
+.ac-list div:hover,.ac-list div.sel{background:var(--teal-soft);color:var(--ink)}
+.switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-top:12px}
+.switch input{accent-color:var(--gold)}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{background:var(--panel2);border-radius:10px;padding:10px 12px}
+.stat .k{font-size:11px;color:var(--muted)}
+.stat .v{font-size:19px;font-family:var(--serif);color:var(--ink);margin-top:2px}
+.hint{font-size:12px;color:var(--muted);line-height:1.8}
+.hint code{background:#0007;padding:1px 5px;border-radius:4px}
+
+/* ---------- Toast & modal ---------- */
+#toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:99;display:flex;flex-direction:column;gap:8px;align-items:center}
+.toast{background:#262a36;border:1px solid var(--line);border-radius:10px;padding:9px 18px;font-size:13px;box-shadow:0 8px 30px #0009;animation:rise .25s}
+.toast.err{border-color:var(--red);color:#f2b8bd}
+#settings{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:98}
+#settings .box{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:24px;width:min(440px,92vw)}
+#settings h2{font-family:var(--serif);color:var(--gold);font-size:18px;margin-bottom:14px}
+#settings input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 12px;color:var(--ink);margin:6px 0 14px;outline:none}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><b>声诊</b><small>SINGING COACH</small></div>
+  <div class="badges">
+    <span class="badge" id="bModel"><span class="dot"></span>模型 …</span>
+    <span class="badge" id="bLLM"><span class="dot"></span>LLM …</span>
+    <span class="badge" id="bLib"><span class="dot"></span>曲库 …</span>
+    <button class="iconbtn" onclick="openSettings()">⚙ API</button>
+  </div>
+</header>
+
+<main>
+  <section class="chat">
+    <div class="stream" id="stream">
+      <div class="msg coach"><div class="who">声乐教练 · 小嗓</div>
+        你好，我是你的声乐教练。🎵
+        · 点下方 <strong>🎤 演唱</strong> 唱一段，或 <strong>📁 上传</strong> 音频文件，我来评测
+        · 右侧可指定曲目（不知道唱什么就直接哼，我试着识别）
+        · 有任何声乐问题也可以直接问我</div>
+    </div>
+    <div class="composer">
+      <span id="songChip" class="hidden" title="当前曲目"></span>
+      <input type="text" id="inp" placeholder="和教练聊聊，或唱一段…" autocomplete="off">
+      <button class="cbtn" id="btnFile" title="上传音频评测">📁</button>
+      <input type="file" id="fileInp" accept="audio/*,.webm,.mp3,.wav,.m4a,.flac,.ogg" class="hidden">
+      <button class="cbtn rec" id="btnRec" title="开始/结束录音">🎤 演唱</button>
+      <button class="cbtn primary" id="btnSend">发送</button>
+    </div>
+  </section>
+
+  <aside class="side">
+    <div class="card">
+      <h3>🎼 当前曲目</h3>
+      <input type="text" id="songInp" placeholder="输入歌名，如：月亮代表我的心" autocomplete="off">
+      <div class="ac-list" id="acList"></div>
+      <div class="switch"><input type="checkbox" id="autoMatch" checked><label for="autoMatch">自动匹配曲目（哼唱识别）</label></div>
+      <div class="switch"><input type="checkbox" id="autoReview" checked><label for="autoReview">评测后自动生成教练点评</label></div>
+    </div>
+    <div class="card">
+      <h3>📊 状态</h3>
+      <div class="stat-grid">
+        <div class="stat"><div class="k">评分模型</div><div class="v" id="stModel">—</div></div>
+        <div class="stat"><div class="k">推理设备</div><div class="v" id="stDev">—</div></div>
+        <div class="stat"><div class="k">参考曲库</div><div class="v" id="stLib">—</div></div>
+        <div class="stat"><div class="k">LLM 评语</div><div class="v" id="stLLM">—</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>💡 使用提示</h3>
+      <div class="hint">
+        · 清唱 15 秒以上效果最好<br>
+        · 指定歌名比自动匹配更可靠<br>
+        · 音准/节奏是和原曲对齐算出的客观分；气息/音色/表现力是 AI 主观分<br>
+        · 评语由 LLM 生成，未配置后端时只显示分数
+      </div>
+    </div>
+  </aside>
+</main>
+
+<div id="toast"></div>
+<div id="settings">
+  <div class="box">
+    <h2>⚙ API 设置</h2>
+    <label style="font-size:12px;color:var(--muted)">后端 API 地址（留空 = 同源）</label>
+    <input type="text" id="apiBaseInp" placeholder="http://服务器IP:8900">
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button class="iconbtn" onclick="closeSettings()">取消</button>
+      <button class="cbtn primary" onclick="saveSettings()">保存</button>
+    </div>
+    <div class="hint" style="margin-top:14px">Swagger API 文档：<code>{API地址}/docs</code>。接口：<code>GET /api/health</code> · <code>GET /api/library</code> · <code>POST /api/diagnose</code> · <code>POST /api/chat</code> · <code>POST /api/report</code></div>
+  </div>
+</div>
+
+<script>
+/* ================= 基础 ================= */
+const $ = s => document.querySelector(s);
+const apiBase = () => (localStorage.getItem('apiBase') || '').replace(/\/+$/,'');
+async function api(path, opts={}){
+  const r = await fetch(apiBase()+path, opts);
+  const d = await r.json().catch(()=>({error:'响应非 JSON（HTTP '+r.status+'）'}));
+  if(!r.ok || d.error) throw new Error(d.error || ('HTTP '+r.status));
+  return d;
+}
+function toast(msg, err=false){
+  const t = document.createElement('div');
+  t.className = 'toast'+(err?' err':''); t.textContent = msg;
+  $('#toast').appendChild(t); setTimeout(()=>t.remove(), 3600);
+}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function mdLite(s){
+  let h = esc(s);
+  h = h.replace(/```([\s\S]*?)```/g,(m,c)=>'<pre style="background:#0007;padding:10px;border-radius:8px;overflow-x:auto;font-size:13px">'+c.trim()+'</pre>');
+  h = h.replace(/`([^`]+)`/g,'<code>$1</code>');
+  h = h.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  h = h.replace(/^#{2,4}\s*(.+)$/gm,'<h3>$1</h3>');
+  h = h.replace(/^[-·]\s+(.+)$/gm,'<li>$1</li>');
+  h = h.replace(/(<li>.*<\/li>\n?)+/g, m=>'<ul>'+m+'</ul>');
+  h = h.replace(/^---+$/gm,'<hr style="border:none;border-top:1px solid var(--line);margin:10px 0">');
+  return h;
+}
+
+/* ================= 状态 ================= */
+let curSong = localStorage.getItem('curSong') || '';
+let lastDiag = null;
+let history = [];   // LLM 对话历史
+const LABELS = {pitch:'音准',rhythm:'节奏',stability:'气息稳定',timbre:'音色',expression:'表现力',overall:'综合'};
+
+function setSong(s){
+  curSong = s || '';
+  localStorage.setItem('curSong', curSong);
+  const chip = $('#songChip');
+  if(curSong){ chip.textContent = '🎼 '+curSong; chip.classList.remove('hidden'); }
+  else chip.classList.add('hidden');
+  $('#songInp').value = curSong;
+}
+
+/* ================= 消息渲染 ================= */
+function addMsg(role, html){
+  const d = document.createElement('div');
+  d.className = 'msg '+role;
+  d.innerHTML = role==='coach' ? '<div class="who">声乐教练 · 小嗓</div>'+html : html;
+  $('#stream').appendChild(d);
+  d.scrollIntoView({behavior:'smooth', block:'end'});
+  return d;
+}
+function addTyping(){
+  const d = document.createElement('div');
+  d.className = 'typing'; d.innerHTML = '<i></i><i></i><i></i>';
+  $('#stream').appendChild(d); d.scrollIntoView({block:'end'});
+  return d;
+}
+
+/* 雷达图（手绘 canvas，无外部依赖） */
+function drawRadar(cv, scores){
+  const dims = ['pitch','rhythm','stability','timbre','expression','overall'];
+  const vals = dims.map(k=>Math.max(0,Math.min(5,scores[k]??0)));
+  const S = 200, C = S/2, R = 78;
+  const dpr = window.devicePixelRatio||1;
+  cv.width = S*dpr; cv.height = S*dpr;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,S,S);
+  const pos = i => { const a = i/6*2*Math.PI - Math.PI/2; return [C+Math.cos(a)*R, C+Math.sin(a)*R]; };
+  // 网格
+  ctx.strokeStyle = '#2b2f3c'; ctx.fillStyle = '#8f93a3'; ctx.font = '11px sans-serif';
+  for(let ring=1; ring<=5; ring++){
+    ctx.beginPath();
+    for(let i=0;i<=6;i++){ const r=R*ring/5;
+      const px=C+Math.cos(i/6*2*Math.PI-Math.PI/2)*r, py=C+Math.sin(i/6*2*Math.PI-Math.PI/2)*r;
+      i?ctx.lineTo(px,py):ctx.moveTo(px,py); }
+    ctx.stroke();
+  }
+  for(let i=0;i<6;i++){
+    const [x,y]=pos(i);
+    ctx.beginPath(); ctx.moveTo(C,C); ctx.lineTo(x,y); ctx.stroke();
+    const lx=C+Math.cos(i/6*2*Math.PI-Math.PI/2)*(R+16), ly=C+Math.sin(i/6*2*Math.PI-Math.PI/2)*(R+16);
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(LABELS[dims[i]], lx, ly);
+  }
+  // 数据
+  ctx.beginPath();
+  vals.forEach((v,i)=>{ const r=R*v/5, a=i/6*2*Math.PI-Math.PI/2;
+    const px=C+Math.cos(a)*r, py=C+Math.sin(a)*r; i?ctx.lineTo(px,py):ctx.moveTo(px,py); });
+  ctx.closePath();
+  ctx.fillStyle='rgba(224,164,88,.22)'; ctx.fill();
+  ctx.strokeStyle='#e0a458'; ctx.lineWidth=2; ctx.stroke();
+  vals.forEach((v,i)=>{ const r=R*v/5, a=i/6*2*Math.PI-Math.PI/2;
+    ctx.beginPath(); ctx.arc(C+Math.cos(a)*r, C+Math.sin(a)*r, 3, 0, 7);
+    ctx.fillStyle='#57c7b2'; ctx.fill(); });
+}
+
+/* ================= 评测卡片 ================= */
+function renderEval(diag){
+  const card = document.createElement('div');
+  card.className = 'eval';
+  const obj = diag.objective||{}, sub = diag.subjective||{}, fb = diag.network_objective_fallback||{};
+  const scoreOf = k => (obj[k] && typeof obj[k][k+'_ref']==='number') ? obj[k][k+'_ref']
+                     : (typeof obj[k]==='number' ? obj[k] : (sub[k] ?? fb[k] ?? null));
+  const scores = {};
+  for(const k of ['pitch','rhythm','stability','timbre','expression','overall']){
+    scores[k] = scoreOf(k) ?? sub[k] ?? fb[k] ?? null;
+  }
+  const m = diag.match||{};
+  let headInner;
+  if(m.song) headInner = `<span class="song">《${esc(m.song)}》${m.artists?' · '+esc(m.artists):''}</span>
+    <span class="conf">匹配置信度 ${(m.confidence??0).toFixed(2)}${m.key_shift?` · 移调 ${m.key_shift>0?'+':''}${m.key_shift}key`:''}</span>`;
+  else headInner = `<span class="song">免参考评测</span><span class="conf">未匹配曲目</span>`;
+  const overall = scores.overall ?? scores.timbre ?? 0;
+  card.innerHTML = `
+    <div class="eval-head">${headInner}
+      <span class="overall">${overall!=null?overall.toFixed(1):'—'}<small> / 5</small></span></div>
+    <div class="eval-body">
+      <canvas class="radar"></canvas>
+      <div class="bars">${
+        Object.keys(LABELS).map(k=>{
+          const v = scores[k];
+          const pct = v==null?0:v/5*100;
+          const color = v==null?'#555': v>=4?'var(--teal)': v>=3?'var(--gold)':'var(--red)';
+          return `<div class="bar-row"><span class="name">${LABELS[k]}</span>
+            <div class="bar"><i style="background:${color}" data-w="${pct}"></i></div>
+            <span class="val" style="color:${color}">${v==null?'—':v.toFixed(2)}</span></div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  // warnings
+  if(diag.warnings && diag.warnings.length){
+    const w = document.createElement('div'); w.className='warns';
+    w.innerHTML = diag.warnings.map(x=>`<div class="warn">⚠ ${esc(x)}</div>`).join('');
+    card.appendChild(w);
+  }
+  // 候选确认
+  if(m.candidates && m.candidates.length){
+    const c = document.createElement('div'); c.className='chips';
+    c.innerHTML = '<span style="font-size:12px;color:var(--muted);align-self:center">是这首吗？</span>';
+    m.candidates.forEach(cand=>{
+      const b = document.createElement('button'); b.className='chip';
+      b.textContent = `《${cand.song}》${(cand.confidence*100|0)}%`;
+      b.onclick = ()=>{ setSong(cand.song); toast('已设为当前曲目，重新演唱或上传即可按此曲评测'); };
+      c.appendChild(b);
+    });
+    card.appendChild(c);
+  }
+  // 问题片段
+  if(diag.segments && diag.segments.length){
+    const s = document.createElement('div'); s.className='segs';
+    s.innerHTML = '<h4>🎯 问题片段（音分偏差 > 40 的乐句）</h4>' + diag.segments.slice(0,5).map(g=>
+      `<div class="seg"><span class="t">${g.start?.toFixed(1)}s</span>
+       <span class="cents ${g.abs_cents>60?'bad':''}">${g.abs_cents}音分</span>
+       <span>${esc(g.lyric||'')}</span></div>`).join('');
+    card.appendChild(s);
+  }
+  $('#stream').appendChild(card);
+  card.scrollIntoView({behavior:'smooth', block:'end'});
+  requestAnimationFrame(()=>{
+    drawRadar(card.querySelector('.radar'), scores);
+    card.querySelectorAll('.bar i').forEach(i=>i.style.width=i.dataset.w+'%');
+  });
+  return card;
+}
+
+/* ================= 评测流程 ================= */
+async function runDiagnose(blob, fname){
+  const typing = addTyping();
+  typing.innerHTML = '评测中（F0 提取 → 曲目匹配 → 神经评分）<i></i><i></i><i></i>';
+  const fd = new FormData();
+  fd.append('file', blob, fnameSafe(blob.name||'record.webm'));
+  if(curSong) fd.append('song', curSong);
+  fd.append('auto_match', $('#autoMatch').checked);
+  try{
+    const diag = await api('/api/diagnose', {method:'POST', body:fd});
+    typing.remove();
+    lastDiag = diag;
+    renderEval(diag);
+    if(diag.match && diag.match.song && diag.match.confidence>=0.5 && !curSong)
+      setSong(diag.match.song);
+    if($('#autoReview').checked) coachReview(diag);
+  }catch(e){
+    typing.remove();
+    toast('评测失败：'+e.message, true);
+  }
+}
+function fnameSafe(n){ return n.replace(/[^\w.\-一-鿿]/g,'_'); }
+
+async function coachReview(diag){
+  const typing = addTyping();
+  const content = '[评测结果] '+JSON.stringify(diag, (k,v)=>k==='segments'?undefined:v);
+  try{
+    const d = await api('/api/chat', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({messages:[...history,{role:'user',content}], song:curSong||null, last_diag:diag})});
+    typing.remove();
+    history.push({role:'user',content:'（提交了一次演唱评测）'},{role:'assistant',content:d.reply});
+    addMsg('coach', mdLite(d.reply));
+  }catch(e){
+    typing.remove();
+    if(String(e.message).includes('LLM')) addMsg('sys','未配置 LLM 后端，仅显示分数');
+    else toast('教练点评失败：'+e.message, true);
+  }
+}
+
+/* ================= 聊天 ================= */
+async function sendChat(text){
+  addMsg('user', esc(text));
+  const typing = addTyping();
+  history.push({role:'user', content:text});
+  try{
+    const d = await api('/api/chat', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({messages:history.slice(-12), song:curSong||null, last_diag:lastDiag})});
+    typing.remove();
+    history.push({role:'assistant', content:d.reply});
+    addMsg('coach', mdLite(d.reply));
+  }catch(e){
+    typing.remove();
+    if(String(e.message).includes('LLM')) addMsg('sys','未配置 LLM 后端：配置 CODEX_* 或 ANTHROPIC_* 环境变量后可用对话与评语');
+    else toast('对话失败：'+e.message, true);
+  }
+}
+
+/* ================= 录音 ================= */
+let mediaRec = null, recChunks = [], recStream = null;
+async function toggleRec(){
+  if(recStream){ stopRec(); return; }
+  if(!navigator.mediaDevices?.getUserMedia){ toast('当前浏览器/环境不支持录音（需 https 或 localhost）', true); return; }
+  try{
+    recStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1, echoCancellation:true}});
+  }catch(e){ toast('麦克风不可用：'+e.message, true); return; }
+  recChunks = [];
+  mediaRec = new MediaRecorder(recStream);
+  mediaRec.ondataavailable = e=>recChunks.push(e.data);
+  mediaRec.onstop = ()=>{
+    const blob = new Blob(recChunks, {type:mediaRec.mimeType||'audio/webm'});
+    recStream.getTracks().forEach(t=>t.stop()); recStream=null;
+    $('#btnRec').classList.remove('on'); $('#btnRec').textContent='🎤 演唱';
+    addMsg('user', '🎤 <i>（演唱录音 '+ (blob.size/1024|0) +' KB）</i>');
+    runDiagnose(blob, 'record.webm');
+  };
+  mediaRec.start();
+  $('#btnRec').classList.add('on'); $('#btnRec').textContent='⏹ 结束';
+  toast('录音中，请开始演唱，再点一次结束');
+}
+function stopRec(){ if(mediaRec && mediaRec.state!=='inactive') mediaRec.stop(); }
+
+/* ================= 歌名补全 ================= */
+let acTimer=null;
+$('#songInp').addEventListener('input', e=>{
+  clearTimeout(acTimer);
+  const q = e.target.value.trim();
+  if(!q){ $('#acList').style.display='none'; setSong(''); return; }
+  acTimer = setTimeout(async ()=>{
+    try{
+      const d = await api('/api/library?q='+encodeURIComponent(q));
+      const list = $('#acList');
+      if(!d.items.length){ list.style.display='none'; setSong(q); return; }
+      list.innerHTML='';
+      d.items.forEach(it=>{
+        const div = document.createElement('div');
+        div.textContent = `${it.song} · ${it.artists||'?'}`;
+        div.onclick = ()=>{ setSong(it.song); list.style.display='none'; };
+        list.appendChild(div);
+      });
+      list.style.display='block';
+      setSong(q);
+    }catch(e){ /* 曲库不可达时静默 */ }
+  }, 350);
+});
+
+/* ================= 设置 ================= */
+function openSettings(){ $('#apiBaseInp').value = apiBase(); $('#settings').style.display='flex'; }
+function closeSettings(){ $('#settings').style.display='none'; }
+function saveSettings(){ localStorage.setItem('apiBase', $('#apiBaseInp').value.trim()); closeSettings(); toast('已保存，刷新状态…'); loadHealth(); }
+$('#settings').addEventListener('click', e=>{ if(e.target.id==='settings') closeSettings(); });
+
+/* ================= 启动 ================= */
+async function loadHealth(){
+  try{
+    const h = await api('/api/health');
+    $('#bModel').className='badge ok';   $('#bModel').innerHTML='<span class="dot"></span>模型 就绪';
+    $('#bLLM').className='badge '+(h.llm?'ok':'warn'); $('#bLLM').innerHTML='<span class="dot"></span>LLM '+(h.llm?'在线':'未配置');
+    $('#bLib').className='badge ok';     $('#bLib').innerHTML=`<span class="dot"></span>曲库 ${h.library_size} 首`;
+    $('#stModel').textContent='R3'; $('#stDev').textContent=h.device;
+    $('#stLib').textContent=h.library_size; $('#stLLM').textContent=h.llm?'在线':'未配置';
+  }catch(e){
+    $('#bModel').className='badge err'; $('#bModel').innerHTML='<span class="dot"></span>后端离线';
+    toast('无法连接后端：'+e.message, true);
+  }
+}
+$('#btnSend').onclick = ()=>{ const v=$('#inp').value.trim(); if(v){ $('#inp').value=''; sendChat(v);} };
+$('#inp').addEventListener('keydown', e=>{ if(e.key==='Enter') $('#btnSend').click(); });
+$('#btnRec').onclick = toggleRec;
+$('#btnFile').onclick = ()=> $('#fileInp').click();
+$('#fileInp').addEventListener('change', e=>{
+  const f = e.target.files[0]; if(!f) return;
+  addMsg('user', `📁 <i>（上传音频 ${esc(f.name)}）</i>`);
+  runDiagnose(f, f.name);
+  e.target.value='';
+});
+setSong(curSong);
+loadHealth();
+</script>
+</body>
+</html>
