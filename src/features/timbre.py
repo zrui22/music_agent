@@ -43,6 +43,45 @@ def _spectral_centroid(x: np.ndarray, sr: int, win=2048, hop=1024) -> float:
     return float(np.mean(cents))
 
 
+def nasal_band_features(seg: np.ndarray, sr: int, win=2048, hop=1024) -> dict:
+    """鼻音度/共鸣亮度半声学特征（Step3：把"鼻音过重""共鸣位置"翻译成可计算量）。
+
+    仅取能量前 50% 的帧（近似发声帧，避开静音段底噪）：
+      nasal_ratio_250_800  鼻音共振区(250-800Hz)能量占 80-4000Hz 比例；偏高=鼻音重
+      lowmid_flatness      250-800Hz 带内谱平坦度；低=该带有尖峰共振(鼻音 twang)
+      hf_formant_ratio     歌手共振峰区(2-5kHz)能量占比；低=闷/挤、缺穿透力
+    """
+    if len(seg) < win:
+        return {}
+    n = (len(seg) - win) // hop + 1
+    frames = np.lib.stride_tricks.as_strided(
+        seg, shape=(n, win), strides=(seg.strides[0] * hop, seg.strides[0]))
+    sp = np.abs(np.fft.rfft(frames * np.hanning(win), axis=1)) ** 2
+    freqs = np.linspace(0, sr / 2, sp.shape[1])
+    e_total = sp.sum(axis=1)
+    thr = np.median(e_total)
+    m = e_total >= thr
+    if m.sum() < 5:
+        return {}
+    sp = sp[m]
+    e_total = e_total[m]
+
+    def band(lo, hi):
+        return sp[:, (freqs >= lo) & (freqs < hi)].sum(axis=1)
+
+    e_nasal, e_hf = band(250, 800), band(2000, 5000)
+    e_ref = band(80, 4000) + 1e-10
+    nasal_ratio = float(np.mean(e_nasal / e_ref))
+    hf_ratio = float(np.mean(e_hf / e_ref))
+    band_sp = sp[:, (freqs >= 250) & (freqs < 800)] + 1e-10
+    flat = np.exp(np.mean(np.log(band_sp), axis=1)) / (band_sp.mean(axis=1) + 1e-10)
+    return {
+        "nasal_ratio_250_800": round(nasal_ratio, 4),
+        "lowmid_flatness": round(float(np.mean(flat)), 4),
+        "hf_formant_ratio": round(hf_ratio, 4),
+    }
+
+
 def timbre_features(wav_path: str, start_s: float, end_s: float,
                     f0_cache=None) -> dict:
     """clip 级音色/发声质量特征。f0_cache 保留接口一致性（本轨自己提 F0 做百分位）。"""
@@ -77,6 +116,7 @@ def timbre_features(wav_path: str, start_s: float, end_s: float,
                                          0, 0, 0.0001, 0.02, 1.3, 1.6)
 
         p5, p50, p95 = (float(v) for v in np.percentile(f0v, [5, 50, 95]))
+        nasal = nasal_band_features(seg, sr)
         return {
             "ok": True,
             "voiced_ratio": round(voiced_ratio, 3),
@@ -87,6 +127,7 @@ def timbre_features(wav_path: str, start_s: float, end_s: float,
             "spectral_centroid_hz": round(_spectral_centroid(seg, sr), 1),
             "f0_p5": round(p5, 1), "f0_p50": round(p50, 1), "f0_p95": round(p95, 1),
             "range_semitones": round(float(12 * np.log2(p95 / max(p5, 1e-3))), 1),
+            **nasal,
         }
     except Exception as e:
         return {"ok": False, "reason": f"{type(e).__name__}:{str(e)[:60]}"}

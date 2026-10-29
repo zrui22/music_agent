@@ -25,7 +25,8 @@ class Scorer:
     def __init__(self, ckpt_path=None, mert_path=None, stats_path=None, device=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         if ckpt_path is None:
-            for cand in (ROOT / "models" / "singing_scorer_v2.pt",
+            for cand in (ROOT / "models" / "singing_scorer_v3.pt",
+                         ROOT / "models" / "singing_scorer_v2.pt",
                          ROOT / "models" / "singing_scorer_v1.pt",
                          ROOT / "runs" / "r3" / "best.pt"):
                 if cand.exists():
@@ -34,7 +35,7 @@ class Scorer:
         if ckpt_path is None:
             raise RuntimeError(
                 "未找到评分模型权重：请按 README「模型资产」下载 "
-                "singing_scorer_v2.pt 到 models/ 目录后重试")
+                "singing_scorer_v3.pt 到 models/ 目录后重试")
         if mert_path is None:
             local = ROOT / "models" / "MERT-v1-95M"
             mert_path = local if local.exists() else "m-a-p/MERT-v1-95M"

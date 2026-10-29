@@ -4,11 +4,14 @@
 动态控制等维度没有现成标签，但声学上有可靠代理量。这些特征既可直接作为
 模型输入（辅路特征），也可作为弱监督锚点参与训练。
 
-全部指标均为 clip 级，输出 dict。仅依赖 numpy + parselmouth。
+全部指标均为 clip 级，输出 dict。仅依赖 numpy（谱通量 onset 为自实现，
+不引 librosa，保持推理端轻依赖）。
 
 维度映射（与 DATA_DESIGN 四维对齐）：
   stability(气息) <- voiced_seg_dur_med / breath_pause_rate / long_note_f0_std / rms_cv_long
   技巧(technique) <- vibrato_coverage / vibrato_extent / run_rate / dynamic_range_db
+  律动(groove)   <- onset_rate / ioi_cv / ioi_entropy / tempo_cv
+  动态弧线        <- dyn_arc_iqr_db / dyn_arc_trend_db_s / dyn_arc_curvature
 """
 import wave
 from pathlib import Path
@@ -90,6 +93,106 @@ def _vibrato(times, midi, voiced, t0, t1, lo_hz=4.0, hi_hz=7.5):
     return None
 
 
+def _spectral_flux_onsets(x: np.ndarray, sr: int, hop=256, win=1024) -> np.ndarray:
+    """谱通量 onset 检测（numpy 自实现，干声人声上足够稳）。
+    novelty = log 谱正向差分求和；自适应阈值 = 局部中值 + 1.5*MAD；最小间隔 60ms。"""
+    n = (len(x) - win) // hop + 1
+    if n < 8:
+        return np.array([])
+    frames = np.lib.stride_tricks.as_strided(
+        x, shape=(n, win), strides=(x.strides[0] * hop, x.strides[0]))
+    sp = np.log1p(1000.0 * np.abs(np.fft.rfft(frames * np.hanning(win), axis=1)))
+    flux = np.maximum(sp[1:] - sp[:-1], 0.0).sum(axis=1)
+    if len(flux) < 5:
+        return np.array([])
+    # 自适应阈值（1s 局部窗）
+    k = max(int(sr / hop), 1)
+    thr = np.array([np.median(flux[max(0, i - k):i + k + 1]) +
+                    1.5 * np.median(np.abs(flux[max(0, i - k):i + k + 1] -
+                                    np.median(flux[max(0, i - k):i + k + 1])))
+                    for i in range(len(flux))])
+    min_gap = max(int(0.06 * sr / hop), 1)
+    onsets, last = [], -min_gap
+    for i in range(1, len(flux) - 1):
+        if flux[i] > thr[i] and flux[i] >= flux[i - 1] and flux[i] >= flux[i + 1]:
+            if i - last >= min_gap:
+                onsets.append(i)
+                last = i
+    return np.array(onsets) * hop / sr  # 秒
+
+
+def _tempo_cv(flux_times: np.ndarray, onsets: np.ndarray) -> float | None:
+    """局部速度稳定性：onset 间隔序列分段估 IOI 中位数，取段间变异系数。
+    ≥3 个 4s 窗且每窗 ≥4 个 onset 才给出，否则 None（短段不适用）。"""
+    if len(onsets) < 12:
+        return None
+    t_end = flux_times
+    win = 4.0
+    tempos = []
+    t0 = 0.0
+    while t0 + win <= t_end + 1e-6:
+        o = onsets[(onsets >= t0) & (onsets < t0 + win)]
+        if len(o) >= 4:
+            ioi = np.diff(o)
+            ioi = ioi[(ioi >= 0.06) & (ioi <= 2.0)]
+            if len(ioi) >= 3:
+                tempos.append(float(np.median(ioi)))
+        t0 += win / 2
+    if len(tempos) < 3:
+        return None
+    tempos = np.array(tempos)
+    med = np.median(tempos)
+    if med <= 0:
+        return None
+    return round(float(np.std(tempos) / med), 3)
+
+
+def groove_dynarc_features(x: np.ndarray, sr: int, t0: float, t1: float,
+                           rr: np.ndarray = None, rt: np.ndarray = None) -> dict:
+    """律动(groove) + 动态弧线特征。仅依赖波形，可独立批量回填。
+
+    groove：onset 率 / IOI 变异系数 / IOI 直方图熵 / 局部速度稳定性
+    动态弧线：0.01s RMS(dB) 包络的 IQR / 线性趋势 / 二次曲率（乐句级强弱塑造）
+    """
+    i0, i1 = int(t0 * sr), int(t1 * sr)
+    seg = x[i0:i1]
+    dur = (i1 - i0) / sr
+    if len(seg) < sr * 1.0 or dur <= 0:
+        return {}
+    onsets = _spectral_flux_onsets(seg, sr)
+    out = {}
+    out["onset_rate"] = round(len(onsets) / dur, 2)
+    ioi = np.diff(onsets)
+    ioi = ioi[(ioi >= 0.06) & (ioi <= 2.0)]
+    if len(ioi) >= 3:
+        out["ioi_cv"] = round(float(np.std(ioi) / max(np.mean(ioi), 1e-6)), 3)
+        hist, _ = np.histogram(ioi, bins=24, range=(0.06, 2.0))
+        p = hist / max(hist.sum(), 1)
+        p = p[p > 0]
+        out["ioi_entropy"] = round(float(-(p * np.log(p)).sum() / np.log(24)), 3)
+    else:
+        out["ioi_cv"] = None
+        out["ioi_entropy"] = None
+    out["tempo_cv"] = _tempo_cv(t1 - t0, onsets + t0)
+
+    # 动态弧线（RMS 包络已由调用方给出时复用，否则自算）
+    if rr is None or rt is None:
+        rt, rr = _rms_envelope(x, sr)
+    m = (rt >= t0) & (rt < t1)
+    r = rr[m]
+    if len(r) >= 20:
+        out["dyn_arc_iqr_db"] = round(float(np.percentile(r, 75) - np.percentile(r, 25)), 2)
+        tt = rt[m] - t0
+        tn = tt / max(tt[-1], 1e-6) * 2 - 1  # 归一化到 [-1,1]
+        out["dyn_arc_trend_db_s"] = round(float(np.polyfit(tt, r, 1)[0]), 3)
+        out["dyn_arc_curvature"] = round(float(np.polyfit(tn, r, 2)[0]), 3)
+    else:
+        out["dyn_arc_iqr_db"] = None
+        out["dyn_arc_trend_db_s"] = None
+        out["dyn_arc_curvature"] = None
+    return out
+
+
 def prosody_features(wav_path, clip_start=None, clip_end=None,
                      f0_cache: dict = None) -> dict:
     """提取 clip（或全曲）的气息/技巧特征。
@@ -150,6 +253,9 @@ def prosody_features(wav_path, clip_start=None, clip_end=None,
     run_rate = float((np.abs(dm) >= 0.5).sum() / dur_min) if len(dm) else 0.0  # 快速转音/跑动
     dyn = float(np.percentile(rr, 95) - np.percentile(rr, 5)) if len(rr) > 10 else 0.0
 
+    # 律动 + 动态弧线（Step3：语义类故障"翻译成"半声学特征）
+    gd = groove_dynarc_features(x, sr, t0, t1, rr=rms, rt=rt)
+
     return {
         "ok": True,
         # 气息
@@ -165,4 +271,8 @@ def prosody_features(wav_path, clip_start=None, clip_end=None,
         "vibrato_extent_cents": round(float(np.median(vib_extents)), 1) if vib_extents else None,
         "run_per_min": round(run_rate, 1),
         "dynamic_range_db": round(dyn, 1),
+        # 律动 / 动态弧线（Step3）
+        **{k: gd.get(k) for k in ("onset_rate", "ioi_cv", "ioi_entropy", "tempo_cv",
+                                  "dyn_arc_iqr_db", "dyn_arc_trend_db_s",
+                                  "dyn_arc_curvature")},
     }

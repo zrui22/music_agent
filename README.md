@@ -189,7 +189,7 @@ export ANTHROPIC_BASE_URL=... ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=...
 
 ## 🧠 模型与训练数据
 
-**模型**（`singing_scorer_v2.pt`，Release 分发，fp16 186M）：
+**模型**（`singing_scorer_v3.pt`，Release 分发，fp16 186M）：
 
 - 主干：[MERT-v1-95M](https://huggingface.co/m-a-p/MERT-v1-95M) 音乐理解预训练编码器
   （冻结卷积特征提取器与前 6 层，可训练 47.2M 参数）
@@ -198,7 +198,9 @@ export ANTHROPIC_BASE_URL=... ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=...
   缺失组用可学习 null token 兜底（融合与头部 2.9M 参数）
 - 输出：6 个独立评分头（音准/节奏/气息稳定/音色/表现力/综合），sigmoid×5 → 0–5 分；
   另有 **32 类声乐故障归因头**（挤卡/漏气/鼻音/胸声不足/换声断裂等，BCE + pos_weight
-  多标签），从 1,299 段专家精标点评学习，在报告中作为"神经网络疑点"提示
+  多标签），从专家精标点评学习，并经规则伪标签蒸馏获得**免参考声学故障检测**能力
+  （无参考曲比对时也能识别音准不稳/节奏拖抢/音量不稳等 18 类声学故障），
+  在报告中作为"神经网络疑点"提示
 
 **训练数据**（自建弱监督数据集，仅用于研究训练，不随仓库/Release 分发）：
 
@@ -218,43 +220,42 @@ export ANTHROPIC_BASE_URL=... ANTHROPIC_API_KEY=... ANTHROPIC_MODEL=...
 
 | 音准 | 节奏 | 气息稳定 | 音色 | 综合 | 表现力 |
 |---|---|---|---|---|---|
-| 0.71 | 0.81 | 0.69 | 0.52 | 0.45 | 0.45 |
+| 0.80 | 0.71 | 0.68 | 0.46 | 0.45 | 0.44 |
 
-故障归因头（423 段专家精标测试集）：平均 AP 为随机基线的 2.8 倍，其中
-high_shout（高音喊叫）/larynx_position（喉位问题）达 10 倍；语义主观类
-（律动/鼻音/情感）受弱监督噪声限制接近随机，仅作低置信提示。
+故障归因头：专家精标测试集上平均 AP 为随机基线的 2.8 倍，其中
+high_shout（高音喊叫）/larynx_position（喉位问题）达 10 倍；规则蒸馏的
+声学故障检测在留出集上 AUC 0.62（节奏不稳 0.89 / 音量不稳 0.71 / 音准不稳 0.70）；
+语义主观类（律动/鼻音/情感）受弱监督噪声限制接近随机，仅作低置信提示。
 
 因此产品形态上：**音准/节奏以算法客观真值直出为准，网络负责气息/音色/表现力等
 主观维度与故障疑点**——整体诊断精度高于任何单一网络输出。
 
 ## 🗂 模型资产（仓库不包含，从 Release 下载）
 
-评分运行需要三件资产（共约 300M），评分权重与归一化统计在
-[Release v2.0.0](https://github.com/zrui22/music_agent/releases/tag/v2.0.0)，
-参考曲库沿用 [Release v1.0.0](https://github.com/zrui22/music_agent/releases/tag/v1.0.0)：
+评分运行需要三件资产（共约 300M），均在
+[Release v3.0.0](https://github.com/zrui22/music_agent/releases/tag/v3.0.0)：
 
 | 文件 | 大小 | md5 | 说明 |
 |---|---|---|---|
-| `singing_scorer_v2.pt` | 186M | `7300f3e0d9164044768ddb3a5f9b1ca2` | 评分网络权重 v2（fp16，含 32 类故障头），Scorer 默认加载 |
-| `feat_stats.json` | 4K | `497af3ea95a951fb5342ff876573f8e4` | 专家特征 z-score 归一化统计（必需，与 v2 权重配套） |
-| `reference_lib_v1.tar.gz` | 110M | `da47e8fdce94e5ce493ef9bf74efa490` | 参考曲库（meta + 逐字歌词 + F0 曲线），在 v1.0.0 release |
+| `singing_scorer_v3.pt` | 186M | `8fba1c0013244ff59f6e6ebc2878fc70` | 评分网络权重 v3（fp16，六维评分 + 32 类故障头，规则蒸馏版），Scorer 默认加载 |
+| `feat_stats.json` | 4K | `497af3ea95a951fb5342ff876573f8e4` | 专家特征 z-score 归一化统计（必需，与 v3 权重配套） |
+| `reference_lib_v1.tar.gz` | 110M | `da47e8fdce94e5ce493ef9bf74efa490` | 参考曲库（meta + 逐字歌词 + F0 曲线） |
 
 ```bash
 mkdir -p models data
-REL2=https://github.com/zrui22/music_agent/releases/download/v2.0.0
-REL1=https://github.com/zrui22/music_agent/releases/download/v1.0.0
+REL=https://github.com/zrui22/music_agent/releases/download/v3.0.0
 
 # 1) 评分权重 + 归一化统计（wget -c 支持断点续传）
-wget -c -O models/singing_scorer_v2.pt $REL2/singing_scorer_v2.pt
-wget -c -O models/feat_stats.json      $REL2/feat_stats.json
+wget -c -O models/singing_scorer_v3.pt $REL/singing_scorer_v3.pt
+wget -c -O models/feat_stats.json      $REL/feat_stats.json
 
 # 2) 参考曲库：下载 → 校验 → 解压到 data/（生成 data/reference/<id>/）
-wget -c -O /tmp/reference_lib_v1.tar.gz $REL1/reference_lib_v1.tar.gz
+wget -c -O /tmp/reference_lib_v1.tar.gz $REL/reference_lib_v1.tar.gz
 echo "da47e8fdce94e5ce493ef9bf74efa490  /tmp/reference_lib_v1.tar.gz" | md5sum -c -
 tar xzf /tmp/reference_lib_v1.tar.gz -C data/
 
 # 3) 可选：校验权重完整性
-echo "7300f3e0d9164044768ddb3a5f9b1ca2  models/singing_scorer_v2.pt" | md5sum -c -
+echo "8fba1c0013244ff59f6e6ebc2878fc70  models/singing_scorer_v3.pt" | md5sum -c -
 echo "497af3ea95a951fb5342ff876573f8e4  models/feat_stats.json"      | md5sum -c -
 ```
 
@@ -270,7 +271,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 ```
 models/
-├── singing_scorer_v2.pt   # 评分网络权重（Scorer 默认加载）
+├── singing_scorer_v3.pt   # 评分网络权重（Scorer 默认加载）
 └── feat_stats.json        # 特征 z-score 归一化统计
 data/reference/<id>/       # 参考曲库，每首一个目录：
                            #   meta.json(歌曲元信息) + ref.lrc.json(逐字歌词) + ref_f0.npz(F0曲线)

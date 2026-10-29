@@ -21,7 +21,7 @@ ENV PYTHONPATH=/app \
     # 国内网络可加速 MERT 编码器下载：-e HF_ENDPOINT=https://hf-mirror.com
 
 # 模型资产不入镜像（见 README「模型资产」），运行时挂载：
-#   models/singing_scorer_v1.pt  评分网络权重
+#   models/singing_scorer_v3.pt  评分网络权重
 #   models/feat_stats.json       特征归一化统计
 #   data/reference/              参考曲库（可选，缺失时仅不能做原曲对齐打分）
 VOLUME ["/app/models", "/app/data"]
