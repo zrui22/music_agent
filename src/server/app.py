@@ -99,51 +99,82 @@ _adding: set = set()   # 正在收录中的网易云 song_id，防并发重复�
 
 @app.get("/api/library/online")
 def library_online(q: str = "", limit: int = 8):
-    """在线搜索候选曲目，in_lib 标记是否已收录本地曲库。"""
+    """在线搜索候选曲目（多源：网易云免费 + 酷狗免费），in_lib 标记是否已收录本地曲库。"""
     q = q.strip()
     if not q:
         return {"items": []}
-    from src.pitchref.netease import search_song, REF_DIR
+    from src.pitchref.netease import search_song as netease_search, REF_DIR
+    from src.pitchref.kugou import search_song as kugou_search
+    out = []
+    seen = set()   # (song, artists) 去重，保留首个出现的源
+    # 酷狗源：免费覆盖广，但无标准 LRC（用网易歌词补）；放前面
     try:
-        cands = search_song(q, limit=limit)
+        for c in kugou_search(q, limit=limit):
+            key = (c["name"].strip(), c["artists"].strip())
+            if key in seen: continue
+            seen.add(key)
+            out.append({
+                "id": None, "hash": c["hash"], "song": c["name"], "artists": c["artists"],
+                "duration_s": c["duration_s"], "source": "kugou",
+                "in_lib": (REF_DIR / f"kg_{c['hash']}" / "ref_f0.npz").exists(),
+            })
+    except Exception:
+        pass
+    # 网易源：有标准 LRC 且目录名=网易 id，可判重
+    try:
+        for c in netease_search(q, limit=limit):
+            key = (c["name"].strip(), c["artists"].strip())
+            if key in seen: continue
+            seen.add(key)
+            out.append({
+                "id": c["id"], "hash": None, "song": c["name"], "artists": c["artists"],
+                "duration_s": round(c.get("duration_s", 0)), "source": "netease",
+                "in_lib": (REF_DIR / str(c["id"]) / "ref_f0.npz").exists(),
+            })
     except Exception as e:
         return JSONResponse({"error": f"在线搜索失败: {type(e).__name__}: {e}"}, 502)
-    return {"items": [{"id": c["id"], "song": c["name"], "artists": c["artists"],
-                       "duration_s": round(c.get("duration_s", 0)),
-                       "in_lib": (REF_DIR / str(c["id"]) / "ref_f0.npz").exists()}
-                      for c in cands]}
+    return {"items": out[:limit]}
 
 
 @app.post("/api/library/add")
 async def library_add(req: Request):
-    """收录在线候选到本地曲库：下载音频+歌词并提取 F0（慢操作，约 10-60s）。"""
-    from src.agent.reference import fetch_by_id
+    """收录在线候选到本地曲库：下载音频+歌词并提取 F0（慢操作，约 10-60s）。
+    请求体带 hash 走酷狗源，带 id 走网易云源。"""
+    from src.agent.reference import fetch_by_id, fetch_by_hash
     try:
         item = await req.json()
     except Exception:
         return JSONResponse({"error": "请求体不是 JSON"}, 400)
+    file_hash = (item.get("hash") or "").strip()
     try:
         song_id = int(item.get("id") or 0)
     except (TypeError, ValueError):
         song_id = 0
-    if not song_id:
-        return JSONResponse({"error": "缺少歌曲 id"}, 400)
+    if not file_hash and not song_id:
+        return JSONResponse({"error": "缺少歌曲 id/hash"}, 400)
+    key = f"kg_{file_hash}" if file_hash else str(song_id)
     with _add_lock:
-        if song_id in _adding:
+        if key in _adding:
             return JSONResponse({"error": "该曲目正在收录中，请稍候"}, 409)
-        _adding.add(song_id)
+        _adding.add(key)
     try:
-        ref = await asyncio.to_thread(
-            fetch_by_id, song_id, item.get("query") or item.get("name", ""),
-            item.get("name", ""), item.get("artists", ""),
-            float(item.get("duration_s") or 0))
+        if file_hash:
+            ref = await asyncio.to_thread(
+                fetch_by_hash, file_hash, item.get("query") or item.get("name", ""),
+                item.get("name", ""), item.get("artists", ""),
+                float(item.get("duration_s") or 0))
+        else:
+            ref = await asyncio.to_thread(
+                fetch_by_id, song_id, item.get("query") or item.get("name", ""),
+                item.get("name", ""), item.get("artists", ""),
+                float(item.get("duration_s") or 0))
     except Exception as e:
         return JSONResponse({"error": f"收录失败: {type(e).__name__}: {e}"}, 500)
     finally:
         with _add_lock:
-            _adding.discard(song_id)
+            _adding.discard(key)
     if ref is None:
-        return JSONResponse({"error": "音频下载失败（VIP/无版权歌曲暂不支持）"}, 502)
+        return JSONResponse({"error": "音频下载失败（源站未放行该曲目）"}, 502)
     return {"ok": True, "ref_id": ref["ref_id"], "song": ref["song"],
             "artists": ref["artists"]}
 

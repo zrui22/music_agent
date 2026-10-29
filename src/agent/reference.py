@@ -80,12 +80,21 @@ def _assemble(ref_dir: Path) -> dict | None:
 
 def fetch_by_id(song_id: int, query: str, name: str, artists: str,
                 duration_s: float = 0) -> dict | None:
-    """按 id 落库一个参考版本（下载+歌词+F0），已缓存直接装配。"""
-    from src.pitchref.netease import download_audio, fetch_lyric
+    """按 id 落库一个参考版本（下载+歌词+F0），已缓存直接装配。
+    下载源 fallback：网易云 outer（免费）→ 酷狗（免费，覆盖现场/DJ/翻唱版）。"""
+    from src.pitchref.netease import download_audio as netease_dl, fetch_lyric
+    from src.pitchref.kugou import search_song as kg_search, download_audio as kugou_dl
     d = REF_DIR / str(song_id)
     d.mkdir(parents=True, exist_ok=True)
-    if not (d / "ref.mp3").exists() and not download_audio(song_id, d / "ref.mp3"):
-        return None
+    mp3 = d / "ref.mp3"
+    if not mp3.exists():
+        if not netease_dl(song_id, mp3):
+            # 网易云 VIP/无版权 → 酷狗 fallback（搜歌名+歌手，选时长最接近的）
+            kg = kg_search(f"{name} {artists}".strip() or query, limit=5)
+            kg = sorted(kg, key=lambda x: abs(x["duration_s"] - duration_s)) if duration_s else kg
+            ok = any(kugou_dl(x["hash"], mp3) for x in kg[:2])
+            if not ok:
+                return None
     mp = d / "meta.json"
     if not mp.exists():
         mp.write_text(json.dumps({"query": query, "id": song_id, "name": name,
@@ -98,6 +107,29 @@ def fetch_by_id(song_id: int, query: str, name: str, artists: str,
                           encoding="utf-8")
         except Exception:
             pass
+    return _assemble(d)
+
+
+def fetch_by_hash(file_hash: str, query: str, name: str, artists: str,
+                  duration_s: float = 0) -> dict | None:
+    """按酷狗 hash 落库一个参考版本。目录名 kg_<hash>，无标准 LRC（歌词留空，
+    评测靠 F0 对齐不依赖歌词；若网易有同曲歌词可由 fetch_by_id 补）。"""
+    from src.pitchref.kugou import download_audio as kugou_dl
+    d = REF_DIR / f"kg_{file_hash}"
+    d.mkdir(parents=True, exist_ok=True)
+    mp3 = d / "ref.mp3"
+    if not mp3.exists():
+        if not kugou_dl(file_hash, mp3):
+            return None
+    mp = d / "meta.json"
+    if not mp.exists():
+        mp.write_text(json.dumps({"query": query, "id": f"kg_{file_hash}",
+                                  "name": name, "artists": artists,
+                                  "duration_s": duration_s, "source": "kugou"},
+                                 ensure_ascii=False), encoding="utf-8")
+    lp = d / "ref.lrc.json"
+    if not lp.exists():
+        lp.write_text("[]", encoding="utf-8")   # 占位，避免每次重试
     return _assemble(d)
 
 
@@ -123,38 +155,55 @@ def resolve_best_version(song: str, cover_f0, cover_dur_s: float = 0,
     """同名多版本时逐一对齐，选代价最低的版本（实测决定性问题：同名不同歌/编曲）。
 
     cover_f0 = (times, midi, voiced)。返回的 dict 多带 tried 列表记录各版本代价。
+    本地曲库（含酷狗 kg_ 目录）同名参考优先对齐，能免下载则免。
     """
-    from src.pitchref.netease import search_song
-    try:
-        cands = search_song(song)
-    except Exception:
-        cands = []
-    exact = [c for c in cands if c["name"].strip() == song.strip()]
-    # 同名精确匹配优先，其次相关结果；已在库里的版本排最前（免下载）
-    def _in_lib(c):
-        return (REF_DIR / str(c["id"]) / "ref_f0.npz").exists()
-    pool = sorted(exact, key=lambda c: -int(_in_lib(c))) or cands
     tried, best = [], None
-    for c in pool[:max_versions]:
-        ref = _assemble(REF_DIR / str(c["id"]))
-        if ref is None:
-            ref = fetch_by_id(c["id"], song, c["name"], c["artists"],
-                              c.get("duration_s", 0))
-            time.sleep(interval)
-        if ref is None:
-            continue
+    seen_dirs = set()
+
+    def _try(ref, tag):
+        nonlocal best
+        if ref is None or str(ref["dir"]) in seen_dirs:
+            return
+        seen_dirs.add(str(ref["dir"]))
         cost, n_frames, ks = _align_cost(cover_f0, ref["f0"])
-        tried.append({"ref_id": c["id"], "artists": c["artists"],
+        tried.append({"ref_id": tag, "artists": ref.get("artists"),
                       "cost": round(cost, 3), "n_frames": n_frames})
         if n_frames >= 100 and (best is None or cost < best[0]):
             best = (cost, ks, ref)
-    if best is None:  # 全部对齐失败：退回首个可用版本（旧行为兜底）
+
+    # 本地曲库同名参考优先（含 kg_ 目录），免下载
+    for it in library(load_f0=False):
+        if (it.get("song") or "").strip() == song.strip():
+            _try(_assemble(it["dir"]), it.get("ref_id"))
+
+    # 本地无可对齐版本（或对齐代价过高疑似错版本）→ 联网搜网易候选
+    if best is None or best[0] > 0.75:
+        from src.pitchref.netease import search_song
+        try:
+            cands = search_song(song)
+        except Exception:
+            cands = []
+        exact = [c for c in cands if c["name"].strip() == song.strip()]
+        # 同名精确匹配优先，其次相关结果；已在库里的版本排最前（免下载）
+        def _in_lib(c):
+            return (REF_DIR / str(c["id"]) / "ref_f0.npz").exists()
+        pool = sorted(exact, key=lambda c: -int(_in_lib(c))) or cands
         for c in pool[:max_versions]:
             ref = _assemble(REF_DIR / str(c["id"]))
-            if ref:
-                ref["tried"] = tried
-                ref["version_confidence"] = 0.2
-                return ref
+            if ref is None:
+                ref = fetch_by_id(c["id"], song, c["name"], c["artists"],
+                                  c.get("duration_s", 0))
+                time.sleep(interval)
+            _try(ref, c["id"])
+        if best is None:  # 全部对齐失败：退回首个可用版本（旧行为兜底）
+            for c in pool[:max_versions]:
+                ref = _assemble(REF_DIR / str(c["id"]))
+                if ref:
+                    ref["tried"] = tried
+                    ref["version_confidence"] = 0.2
+                    return ref
+            return None
+    if best is None:
         return None
     cost, ks, ref = best
     ref["tried"] = tried
