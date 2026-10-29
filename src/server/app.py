@@ -94,85 +94,117 @@ def library(q: str = "", limit: int = 20):
 # ---------- 在线曲库搜索 / 收录 ----------
 
 _add_lock = threading.Lock()
-_adding: set = set()   # 正在收录中的网易云 song_id，防并发重复下载
+_adding: set = set()   # 正在收录中的目录 key，防并发重复下载
+
+# 在线音源（按序合并去重；netease 有标准 LRC 排首，酷狗免费覆盖广次之，
+# 5sing 素人翻唱贴近用户演唱场景，jamendo 为可选 CC 源）
+_SOURCE_LABELS = {"netease": "网易", "kugou": "酷狗", "5sing": "5sing",
+                  "jamendo": "Jamendo"}
+
+
+def _search_all(q: str, limit: int) -> list:
+    """并行搜索全部在线源，返回合并去重后的候选列表（每项带 dir_key/in_lib）。"""
+    from src.pitchref.netease import search_song as netease_search, REF_DIR
+    from src.pitchref.kugou import search_song as kugou_search
+    from src.pitchref.sing5 import search_song as sing5_search
+    from src.pitchref.jamendo import search_song as jamendo_search, available as jm_on
+    from src.agent.reference import source_dir_key
+    from concurrent.futures import ThreadPoolExecutor
+    sources = [("netease", netease_search), ("kugou", kugou_search),
+               ("5sing", sing5_search)]
+    if jm_on():
+        sources.append(("jamendo", jamendo_search))
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(sources)) as ex:
+        futs = {src: ex.submit(fn, q, limit) for src, fn in sources}
+        for src, fut in futs.items():
+            try:
+                results[src] = fut.result(timeout=20)
+            except Exception:
+                results[src] = []
+    out, seen = [], set()
+    idx = 0
+    while True:   # 轮转合并：每源依次取一个，避免单源占满配额
+        progressed = False
+        for src, _ in sources:
+            lst = results.get(src) or []
+            if idx >= len(lst):
+                continue
+            progressed = True
+            c = lst[idx]
+            name = (c.get("name") or "").strip()
+            k = str(c.get("id") if src == "netease" else c.get("key") or c.get("hash") or "")
+            if name and k:
+                key2 = (name.lower(), (c.get("artists") or "").strip().lower())
+                if key2 not in seen:
+                    seen.add(key2)
+                    dk = source_dir_key(src, k)
+                    out.append({
+                        "source": src, "key": k, "dir_key": dk,
+                        "source_label": _SOURCE_LABELS.get(src, src),
+                        "song": name, "artists": (c.get("artists") or "").strip(),
+                        "duration_s": round(c.get("duration_s") or 0),
+                        "in_lib": (REF_DIR / dk / "ref_f0.npz").exists(),
+                    })
+        if not progressed or len(out) >= limit:
+            break
+        idx += 1
+    return out
 
 
 @app.get("/api/library/online")
-def library_online(q: str = "", limit: int = 8):
-    """在线搜索候选曲目（多源：网易云免费 + 酷狗免费），in_lib 标记是否已收录本地曲库。"""
+def library_online(q: str = "", limit: int = 12):
+    """在线搜索候选曲目（多源并行：网易/酷狗/5sing/Jamendo），in_lib 标记是否已收录。"""
     q = q.strip()
     if not q:
         return {"items": []}
-    from src.pitchref.netease import search_song as netease_search, REF_DIR
-    from src.pitchref.kugou import search_song as kugou_search
-    out = []
-    seen = set()   # (song, artists) 去重，保留首个出现的源
-    # 酷狗源：免费覆盖广，但无标准 LRC（用网易歌词补）；放前面
     try:
-        for c in kugou_search(q, limit=limit):
-            key = (c["name"].strip(), c["artists"].strip())
-            if key in seen: continue
-            seen.add(key)
-            out.append({
-                "id": None, "hash": c["hash"], "song": c["name"], "artists": c["artists"],
-                "duration_s": c["duration_s"], "source": "kugou",
-                "in_lib": (REF_DIR / f"kg_{c['hash']}" / "ref_f0.npz").exists(),
-            })
-    except Exception:
-        pass
-    # 网易源：有标准 LRC 且目录名=网易 id，可判重
-    try:
-        for c in netease_search(q, limit=limit):
-            key = (c["name"].strip(), c["artists"].strip())
-            if key in seen: continue
-            seen.add(key)
-            out.append({
-                "id": c["id"], "hash": None, "song": c["name"], "artists": c["artists"],
-                "duration_s": round(c.get("duration_s", 0)), "source": "netease",
-                "in_lib": (REF_DIR / str(c["id"]) / "ref_f0.npz").exists(),
-            })
+        return {"items": _search_all(q, limit)[:limit]}
     except Exception as e:
         return JSONResponse({"error": f"在线搜索失败: {type(e).__name__}: {e}"}, 502)
-    return {"items": out[:limit]}
 
 
 @app.post("/api/library/add")
 async def library_add(req: Request):
-    """收录在线候选到本地曲库：下载音频+歌词并提取 F0（慢操作，约 10-60s）。
-    请求体带 hash 走酷狗源，带 id 走网易云源。"""
-    from src.agent.reference import fetch_by_id, fetch_by_hash
+    """收录在线候选到本地曲库：下载音频并提取 F0（慢操作，约 10-60s）。
+    请求体：{source, key, name, artists, query?, duration_s?}。
+    兼容旧字段：id（=netease key）、hash（=kugou key）。"""
+    from src.agent.reference import fetch_by_id, fetch_by_key, source_dir_key
     try:
         item = await req.json()
     except Exception:
         return JSONResponse({"error": "请求体不是 JSON"}, 400)
-    file_hash = (item.get("hash") or "").strip()
-    try:
-        song_id = int(item.get("id") or 0)
-    except (TypeError, ValueError):
-        song_id = 0
-    if not file_hash and not song_id:
-        return JSONResponse({"error": "缺少歌曲 id/hash"}, 400)
-    key = f"kg_{file_hash}" if file_hash else str(song_id)
+    source = (item.get("source") or "").strip()
+    key = str(item.get("key") or "").strip()
+    if not key and item.get("hash"):   # 旧版酷狗字段
+        source, key = "kugou", str(item["hash"])
+    if not key and item.get("id"):     # 旧版网易字段
+        source, key = "netease", str(item["id"])
+    if not source and key:
+        source = "netease"
+    if not key or source not in _SOURCE_LABELS:
+        return JSONResponse({"error": "缺少有效的 source/key"}, 400)
+    dk = source_dir_key(source, key)
     with _add_lock:
-        if key in _adding:
+        if dk in _adding:
             return JSONResponse({"error": "该曲目正在收录中，请稍候"}, 409)
-        _adding.add(key)
+        _adding.add(dk)
     try:
-        if file_hash:
+        if source == "netease":
             ref = await asyncio.to_thread(
-                fetch_by_hash, file_hash, item.get("query") or item.get("name", ""),
+                fetch_by_id, int(key), item.get("query") or item.get("name", ""),
                 item.get("name", ""), item.get("artists", ""),
                 float(item.get("duration_s") or 0))
         else:
             ref = await asyncio.to_thread(
-                fetch_by_id, song_id, item.get("query") or item.get("name", ""),
+                fetch_by_key, source, key, item.get("query") or item.get("name", ""),
                 item.get("name", ""), item.get("artists", ""),
                 float(item.get("duration_s") or 0))
     except Exception as e:
         return JSONResponse({"error": f"收录失败: {type(e).__name__}: {e}"}, 500)
     finally:
         with _add_lock:
-            _adding.discard(key)
+            _adding.discard(dk)
     if ref is None:
         return JSONResponse({"error": "音频下载失败（源站未放行该曲目）"}, 502)
     return {"ok": True, "ref_id": ref["ref_id"], "song": ref["song"],

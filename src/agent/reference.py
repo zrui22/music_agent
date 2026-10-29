@@ -110,22 +110,40 @@ def fetch_by_id(song_id: int, query: str, name: str, artists: str,
     return _assemble(d)
 
 
-def fetch_by_hash(file_hash: str, query: str, name: str, artists: str,
-                  duration_s: float = 0) -> dict | None:
-    """按酷狗 hash 落库一个参考版本。目录名 kg_<hash>，无标准 LRC（歌词留空，
-    评测靠 F0 对齐不依赖歌词；若网易有同曲歌词可由 fetch_by_id 补）。"""
-    from src.pitchref.kugou import download_audio as kugou_dl
-    d = REF_DIR / f"kg_{file_hash}"
+_SOURCE_PREFIX = {"kugou": "kg", "5sing": "sg", "jamendo": "jm"}
+
+
+def source_dir_key(source: str, key: str) -> str:
+    """在线候选 -> 本地目录名（netease 用纯数字 id，其余 <前缀>_<key>）。"""
+    if source == "netease":
+        return str(key)
+    prefix = _SOURCE_PREFIX.get(source, "x")
+    return f"{prefix}_{key.replace(':', '_')}"
+
+
+def fetch_by_key(source: str, key: str, query: str, name: str, artists: str,
+                 duration_s: float = 0) -> dict | None:
+    """按源落库一个参考版本（非网易源统一入口）。无标准 LRC（歌词留空占位，
+    评测靠 F0 对齐不依赖歌词；网易同曲歌词可由 fetch_by_id 路径补）。"""
+    if source == "kugou":
+        from src.pitchref.kugou import download_audio as dl
+    elif source == "5sing":
+        from src.pitchref.sing5 import download_audio as dl
+    elif source == "jamendo":
+        from src.pitchref.jamendo import download_audio as dl
+    else:
+        return None
+    d = REF_DIR / source_dir_key(source, key)
     d.mkdir(parents=True, exist_ok=True)
     mp3 = d / "ref.mp3"
     if not mp3.exists():
-        if not kugou_dl(file_hash, mp3):
+        if not dl(key, mp3):
             return None
     mp = d / "meta.json"
     if not mp.exists():
-        mp.write_text(json.dumps({"query": query, "id": f"kg_{file_hash}",
+        mp.write_text(json.dumps({"query": query, "id": d.name,
                                   "name": name, "artists": artists,
-                                  "duration_s": duration_s, "source": "kugou"},
+                                  "duration_s": duration_s, "source": source},
                                  ensure_ascii=False), encoding="utf-8")
     lp = d / "ref.lrc.json"
     if not lp.exists():

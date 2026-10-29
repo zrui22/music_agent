@@ -688,6 +688,13 @@ let composing=false, acIdx=-1, acItems=[], acOpen=false, searchSeq=0, addingId=0
 const songInp=$('#songInp'), acList=$('#acList');
 
 function acClose(){ acOpen=false; acIdx=-1; acItems=[]; acList.style.display='none'; }
+function srcLabelOf(refId){   // 由本地 ref_id 前缀推断来源标签（与后端目录命名一致）
+  const s=String(refId||'');
+  if(s.startsWith('kg_')) return '酷狗';
+  if(s.startsWith('sg_')) return '5sing';
+  if(s.startsWith('jm_')) return 'Jamendo';
+  return s? '网易':'';
+}
 function acLoadingRow(text){
   const d=document.createElement('div'); d.className='ac-load';
   d.innerHTML=`<span class="spinner"></span><span>${text}</span>`;
@@ -703,12 +710,10 @@ function acRender(loadingText){
     acList.appendChild(d);
   }
   acItems.forEach((it,i)=>{
+    const srcLbl=it.source_label||srcLabelOf(it.id);
     let tag;
-    if(it.in_lib) tag='<span class="tag lib">✓ 已收录</span>';
-    else{
-      const src=it.source==='kugou'?'酷狗':it.source==='netease'?'网易':'';
-      tag=`<span class="tag dl">⬇ 收录${src?` · ${src}`:''}</span>`;
-    }
+    if(it.in_lib) tag=`<span class="tag lib">✓ 已收录${srcLbl?` · ${srcLbl}`:''}</span>`;
+    else tag=`<span class="tag dl">⬇ 收录${srcLbl?` · ${srcLbl}`:''}</span>`;
     const d=document.createElement('div');
     d.innerHTML=`<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.song)} · ${esc(it.artists||'?')}</span>${tag}`;
     if(i===acIdx) d.classList.add('sel');
@@ -735,7 +740,7 @@ async function acSearch(){
     if(seq!==searchSeq) return;
     if(!r.ok) throw new Error(d.error||('HTTP '+r.status));
     const seen=new Set(acItems.map(it=>String(it.id)));
-    const online=d.items.filter(it=>!seen.has(String(it.hash?('kg_'+it.hash):it.id)));
+    const online=d.items.filter(it=>!seen.has(String(it.dir_key)));
     acItems=[...acItems, ...online];   // 已收录的本地结果在前，在线候选在后
     acRender();
   }catch(e){
@@ -750,13 +755,13 @@ async function acPick(i){
   const it=acItems[i];
   if(it.in_lib){ setSong(it.song); acClose(); return; }
   if(addingId){ toast('有曲目正在收录中，请稍候'); return; }
-  addingId=it.hash?('kg_'+it.hash):it.id; acItems=[it]; acRender(''); // 只留当前行
+  addingId=it.dir_key||it.id; acItems=[it]; acRender(''); // 只留当前行
   const row=acList.children[0];
   if(row){ row.className='ac-load'; row.innerHTML=`<span class="spinner"></span><span>收录「${esc(it.song)}」中：下载音频 → 提取音高特征，约 30-60 秒…</span>`; }
   acList.style.display='block';
   try{
-    const body=it.hash?{hash:it.hash,name:it.song,artists:it.artists,query:it.song,duration_s:it.duration_s||0}
-                      :{id:it.id,name:it.song,artists:it.artists,query:it.song,duration_s:it.duration_s||0};
+    const body={source:it.source||'netease', key:String(it.key??it.id),
+                name:it.song, artists:it.artists, query:it.song, duration_s:it.duration_s||0};
     const r=await fetch(apiBase()+'/api/library/add',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify(body)});

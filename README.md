@@ -101,9 +101,16 @@ PYTHONPATH=. uvicorn src.server.app:app --host 0.0.0.0 --port 9527
 |---|---|
 | `GET /api/health` | 模型/设备/曲库状态 |
 | `GET /api/library?q=` | 参考曲库检索（歌名补全） |
+| `GET /api/library/online?q=` | 在线多源曲目检索（多平台并行合并、标注来源、自动判重） |
+| `POST /api/library/add` | 收录在线候选到本地曲库（下载音频 + 提取 F0；网易源失败自动 fallback 其他源） |
 | `POST /api/diagnose` | multipart 上传音频评测（可带 `song` / `auto_match`），内置歌声门控 |
 | `POST /api/llm/relay` | LLM 无状态中转（前端默认经它转发 LLM 请求，Key 不落地） |
 | `POST /api/tts` | 语音合成三级回退：本地克隆声线 sidecar（可选）→ edge-tts 在线声线 → 浏览器 TTS |
+
+**多源参考曲库**：曲目搜索/收录支持多个公开音源平台并行检索（含翻唱平台，
+素人翻唱版本对评测对齐同样有效）。设置环境变量 `JAMENDO_CLIENT_ID`
+（[Jamendo 开发者](https://devportal.jamendo.com/)免费注册）可额外启用
+CC 授权音乐源。评测时本地曲库同名版本优先对齐，能免下载则免。
 
 **歌声门控**：`/api/diagnose` 先判断"有没有唱"（响度 / F0 发声占比 / 最长持续音
 三个轻量信号），空录音、纯噪声、说话会直接返回 `{"singing": false, "message": …}`
