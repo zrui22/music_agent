@@ -672,29 +672,59 @@ function showRecPreview(blob, secs){
   d.scrollIntoView({behavior:'smooth', block:'end'});
 }
 
-/* ================= 歌名补全 ================= */
-let acTimer=null;
-$('#songInp').addEventListener('input', e=>{
+/* ================= 歌名补全（IME 感知 + 竞态防护 + 键盘导航） ================= */
+let acTimer=null, acSeq=0, acIdx=-1, acItems=[], acOpen=false, composing=false;
+const songInp=$('#songInp'), acList=$('#acList');
+
+function acClose(){ acOpen=false; acIdx=-1; acItems=[]; acList.style.display='none'; }
+function acRender(){
+  acList.innerHTML='';
+  if(!acItems.length){
+    const d=document.createElement('div');
+    d.style.cssText='cursor:default;font-style:italic';
+    d.textContent=`曲库未收录「${songInp.value.trim()}」——可直接演唱，将自动匹配相近曲目`;
+    acList.appendChild(d);
+  }else{
+    acItems.forEach((it,i)=>{
+      const div=document.createElement('div');
+      div.textContent=`${it.song} · ${it.artists||'?'}`;
+      if(i===acIdx) div.classList.add('sel');
+      div.onmousedown=e=>{ e.preventDefault(); acPick(i); };  // mousedown 先于 blur，保持焦点
+      acList.appendChild(div);
+    });
+  }
+  acList.style.display='block'; acOpen=true;
+}
+function acPick(i){
+  if(i<0||i>=acItems.length) return;
+  setSong(acItems[i].song); acClose();
+}
+async function acQuery(){
+  const q=songInp.value.trim();
+  const seq=++acSeq;
+  if(!q){ acClose(); setSong(''); return; }
+  try{
+    const d=await api('/api/library?q='+encodeURIComponent(q));
+    if(seq!==acSeq) return;              // 丢弃晚到的旧响应
+    acItems=d.items; acIdx=-1; acRender();
+    setSong(q);
+  }catch(e){ /* 曲库不可达时静默 */ }
+}
+songInp.addEventListener('input', e=>{
+  if(composing||e.isComposing) return;   // IME 组词中间态不触发查询
   clearTimeout(acTimer);
-  const q = e.target.value.trim();
-  if(!q){ $('#acList').style.display='none'; setSong(''); return; }
-  acTimer = setTimeout(async ()=>{
-    try{
-      const d = await api('/api/library?q='+encodeURIComponent(q));
-      const list = $('#acList');
-      if(!d.items.length){ list.style.display='none'; setSong(q); return; }
-      list.innerHTML='';
-      d.items.forEach(it=>{
-        const div = document.createElement('div');
-        div.textContent = `${it.song} · ${it.artists||'?'}`;
-        div.onclick = ()=>{ setSong(it.song); list.style.display='none'; };
-        list.appendChild(div);
-      });
-      list.style.display='block';
-      setSong(q);
-    }catch(e){ /* 曲库不可达时静默 */ }
-  }, 350);
+  acTimer=setTimeout(acQuery, 350);
 });
+songInp.addEventListener('compositionstart', ()=>{ composing=true; clearTimeout(acTimer); });
+songInp.addEventListener('compositionend', ()=>{ composing=false; acQuery(); });  // 组词完成才查
+songInp.addEventListener('keydown', e=>{
+  if(e.isComposing||composing||!acOpen) return;
+  if(e.key==='ArrowDown'){ e.preventDefault(); acIdx=Math.min(acIdx+1,acItems.length-1); acRender(); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); acIdx=Math.max(acIdx-1,0); acRender(); }
+  else if(e.key==='Enter'){ if(acIdx>=0){ e.preventDefault(); acPick(acIdx); } else acClose(); }
+  else if(e.key==='Escape'){ acClose(); }
+});
+songInp.addEventListener('blur', ()=> setTimeout(acClose, 150));
 
 /* ================= 设置 ================= */
 // 声线选择持久化（即时生效，无需保存按钮）
