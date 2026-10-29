@@ -5,7 +5,9 @@
 
 API：
     GET  /api/health     服务状态（模型/设备/曲库规模）
-    GET  /api/library    参考曲库列表，?q= 过滤（歌名补全）
+    GET  /api/library    参考曲库列表，?q= 过滤（本地曲库）
+    GET  /api/library/online  在线搜索候选曲目（?q=），in_lib 标记是否已收录
+    POST /api/library/add     收录在线候选到本地曲库（下载音频+歌词+F0，慢操作）
     POST /api/diagnose   multipart: file=音频, song?=歌名, auto_match?=bool -> 完整评测 JSON
     POST /api/llm/relay  可选的 LLM 无状态中转（仅当浏览器直连被 CORS 拦截时使用）
     POST /api/tts        语音合成（edge-tts 在线声线，免费无 Key；失败时前端自动回退浏览器 TTS）
@@ -87,6 +89,63 @@ def library(q: str = "", limit: int = 20):
     return {"total": len(items),
             "items": [{"song": it["song"], "artists": it["artists"],
                        "ref_id": it["ref_id"]} for it in items[:limit]]}
+
+
+# ---------- 在线曲库搜索 / 收录 ----------
+
+_add_lock = threading.Lock()
+_adding: set = set()   # 正在收录中的网易云 song_id，防并发重复下载
+
+
+@app.get("/api/library/online")
+def library_online(q: str = "", limit: int = 8):
+    """在线搜索候选曲目，in_lib 标记是否已收录本地曲库。"""
+    q = q.strip()
+    if not q:
+        return {"items": []}
+    from src.pitchref.netease import search_song, REF_DIR
+    try:
+        cands = search_song(q, limit=limit)
+    except Exception as e:
+        return JSONResponse({"error": f"在线搜索失败: {type(e).__name__}: {e}"}, 502)
+    return {"items": [{"id": c["id"], "song": c["name"], "artists": c["artists"],
+                       "duration_s": round(c.get("duration_s", 0)),
+                       "in_lib": (REF_DIR / str(c["id"]) / "ref_f0.npz").exists()}
+                      for c in cands]}
+
+
+@app.post("/api/library/add")
+async def library_add(req: Request):
+    """收录在线候选到本地曲库：下载音频+歌词并提取 F0（慢操作，约 10-60s）。"""
+    from src.agent.reference import fetch_by_id
+    try:
+        item = await req.json()
+    except Exception:
+        return JSONResponse({"error": "请求体不是 JSON"}, 400)
+    try:
+        song_id = int(item.get("id") or 0)
+    except (TypeError, ValueError):
+        song_id = 0
+    if not song_id:
+        return JSONResponse({"error": "缺少歌曲 id"}, 400)
+    with _add_lock:
+        if song_id in _adding:
+            return JSONResponse({"error": "该曲目正在收录中，请稍候"}, 409)
+        _adding.add(song_id)
+    try:
+        ref = await asyncio.to_thread(
+            fetch_by_id, song_id, item.get("query") or item.get("name", ""),
+            item.get("name", ""), item.get("artists", ""),
+            float(item.get("duration_s") or 0))
+    except Exception as e:
+        return JSONResponse({"error": f"收录失败: {type(e).__name__}: {e}"}, 500)
+    finally:
+        with _add_lock:
+            _adding.discard(song_id)
+    if ref is None:
+        return JSONResponse({"error": "音频下载失败（VIP/无版权歌曲暂不支持）"}, 502)
+    return {"ok": True, "ref_id": ref["ref_id"], "song": ref["song"],
+            "artists": ref["artists"]}
 
 
 # ---------- 评测 ----------

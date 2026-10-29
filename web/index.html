@@ -128,6 +128,14 @@ canvas.radar{width:200px;height:200px}
 .ac-list{border:1px solid var(--line);border-radius:9px;margin-top:4px;overflow:hidden;display:none}
 .ac-list div{padding:7px 11px;font-size:13px;cursor:pointer;color:var(--muted)}
 .ac-list div:hover,.ac-list div.sel{background:var(--teal-soft);color:var(--ink)}
+.ac-list div{display:flex;align-items:center;gap:6px}
+.ac-list .tag{font-size:11px;padding:1px 6px;border-radius:4px;margin-left:auto;flex:none}
+.tag.lib{background:var(--teal-soft);color:var(--teal)}
+.tag.dl{background:#3a2b12;color:var(--gold)}
+.ac-load{display:flex;align-items:center;gap:8px;padding:10px 11px;font-size:13px;color:var(--muted)}
+.ac-load:hover{background:none!important;color:var(--muted)!important}
+.spinner{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--teal);border-radius:50%;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
 .switch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-top:12px}
 .switch input{accent-color:var(--gold)}
 .hint{font-size:12px;color:var(--muted);line-height:1.8}
@@ -178,7 +186,10 @@ canvas.radar{width:200px;height:200px}
   <aside class="side">
     <div class="card">
       <h3>🎼 当前曲目</h3>
-      <input type="text" id="songInp" placeholder="输入歌名，如：月亮代表我的心" autocomplete="off">
+      <div style="display:flex;gap:6px">
+        <input type="text" id="songInp" placeholder="输入歌名，回车联网搜索" autocomplete="off" style="flex:1">
+        <button class="cbtn" id="btnSongSearch" title="搜索曲目" style="padding:8px 12px;flex:none">🔍</button>
+      </div>
       <div class="ac-list" id="acList"></div>
       <div class="switch"><input type="checkbox" id="autoMatch" checked><label for="autoMatch">自动匹配曲目（哼唱识别）</label></div>
       <div class="switch"><input type="checkbox" id="autoReview" checked><label for="autoReview">评测后自动生成教练点评</label></div>
@@ -672,59 +683,104 @@ function showRecPreview(blob, secs){
   d.scrollIntoView({behavior:'smooth', block:'end'});
 }
 
-/* ================= 歌名补全（IME 感知 + 竞态防护 + 键盘导航） ================= */
-let acTimer=null, acSeq=0, acIdx=-1, acItems=[], acOpen=false, composing=false;
+/* ================= 曲目搜索（Enter/按钮 主动触发；本地+在线合并；在线候选点击收录） ================= */
+let composing=false, acIdx=-1, acItems=[], acOpen=false, searchSeq=0, addingId=0;
 const songInp=$('#songInp'), acList=$('#acList');
 
 function acClose(){ acOpen=false; acIdx=-1; acItems=[]; acList.style.display='none'; }
-function acRender(){
+function acLoadingRow(text){
+  const d=document.createElement('div'); d.className='ac-load';
+  d.innerHTML=`<span class="spinner"></span><span>${text}</span>`;
+  return d;
+}
+function acRender(loadingText){
   acList.innerHTML='';
-  if(!acItems.length){
+  if(loadingText) acList.appendChild(acLoadingRow(loadingText));
+  if(!acItems.length && !loadingText){
     const d=document.createElement('div');
     d.style.cssText='cursor:default;font-style:italic';
-    d.textContent=`曲库未收录「${songInp.value.trim()}」——可直接演唱，将自动匹配相近曲目`;
+    d.textContent=`曲库与在线均未找到「${songInp.value.trim()}」，可直接演唱（将按无参考评测）`;
     acList.appendChild(d);
-  }else{
-    acItems.forEach((it,i)=>{
-      const div=document.createElement('div');
-      div.textContent=`${it.song} · ${it.artists||'?'}`;
-      if(i===acIdx) div.classList.add('sel');
-      div.onmousedown=e=>{ e.preventDefault(); acPick(i); };  // mousedown 先于 blur，保持焦点
-      acList.appendChild(div);
-    });
   }
+  acItems.forEach((it,i)=>{
+    const tag=it.in_lib?'<span class="tag lib">✓ 已收录</span>':'<span class="tag dl">⬇ 收录</span>';
+    const d=document.createElement('div');
+    d.innerHTML=`<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.song)} · ${esc(it.artists||'?')}</span>${tag}`;
+    if(i===acIdx) d.classList.add('sel');
+    d.onmousedown=e=>{ e.preventDefault(); acPick(i); };
+    acList.appendChild(d);
+  });
   acList.style.display='block'; acOpen=true;
 }
-function acPick(i){
-  if(i<0||i>=acItems.length) return;
-  setSong(acItems[i].song); acClose();
-}
-async function acQuery(){
+
+async function acSearch(){
   const q=songInp.value.trim();
-  const seq=++acSeq;
   if(!q){ acClose(); setSong(''); return; }
+  const seq=++searchSeq; acIdx=-1;
+  acItems=[]; acRender('正在搜索本地曲库…');
   try{
     const d=await api('/api/library?q='+encodeURIComponent(q));
-    if(seq!==acSeq) return;              // 丢弃晚到的旧响应
-    acItems=d.items; acIdx=-1; acRender();
-    setSong(q);
-  }catch(e){ /* 曲库不可达时静默 */ }
+    if(seq!==searchSeq) return;
+    acItems=d.items.map(it=>({id:it.ref_id, song:it.song, artists:it.artists, in_lib:true}));
+    acRender('正在联网搜索在线曲库…');
+  }catch(e){ if(seq!==searchSeq) return; acRender('正在联网搜索在线曲库…'); }
+  try{
+    const r=await fetch(apiBase()+'/api/library/online?q='+encodeURIComponent(q));
+    const d=await r.json();
+    if(seq!==searchSeq) return;
+    if(!r.ok) throw new Error(d.error||('HTTP '+r.status));
+    const seen=new Set(acItems.map(it=>it.id));
+    const online=d.items.filter(it=>!seen.has(it.id));
+    acItems=[...acItems, ...online];   // 已收录的本地结果在前，在线候选在后
+    acRender();
+  }catch(e){
+    if(seq!==searchSeq) return;
+    if(!acItems.length){ acClose(); toast('在线搜索不可用：'+e.message); return; }
+    acRender(); toast('在线搜索不可用，仅显示本地结果');
+  }
 }
+
+async function acPick(i){
+  if(i<0||i>=acItems.length) return;
+  const it=acItems[i];
+  if(it.in_lib){ setSong(it.song); acClose(); return; }
+  if(addingId){ toast('有曲目正在收录中，请稍候'); return; }
+  addingId=it.id; acItems=[it]; acRender(''); // 只留当前行
+  const row=acList.children[0];
+  if(row){ row.className='ac-load'; row.innerHTML=`<span class="spinner"></span><span>收录「${esc(it.song)}」中：下载音频 → 提取音高特征，约 30-60 秒…</span>`; }
+  acList.style.display='block';
+  try{
+    const r=await fetch(apiBase()+'/api/library/add',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:it.id, name:it.song, artists:it.artists, query:it.song, duration_s:it.duration_s||0})});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.error||('HTTP '+r.status));
+    toast(`✓ 已收录「${d.song}」，并设为当前曲目`);
+    setSong(d.song); acClose();
+    loadHealth();   // 刷新曲库计数徽标
+  }catch(e){
+    toast('收录失败：'+e.message); acClose();
+  }finally{ addingId=0; }
+}
+
 songInp.addEventListener('input', e=>{
-  if(composing||e.isComposing) return;   // IME 组词中间态不触发查询
-  clearTimeout(acTimer);
-  acTimer=setTimeout(acQuery, 350);
+  if(composing||e.isComposing) return;
+  if(!songInp.value.trim()){ acClose(); setSong(''); }   // 清空输入 = 清除当前曲目
 });
-songInp.addEventListener('compositionstart', ()=>{ composing=true; clearTimeout(acTimer); });
-songInp.addEventListener('compositionend', ()=>{ composing=false; acQuery(); });  // 组词完成才查
+songInp.addEventListener('compositionstart', ()=>{ composing=true; });
+songInp.addEventListener('compositionend', ()=>{ composing=false; });
 songInp.addEventListener('keydown', e=>{
-  if(e.isComposing||composing||!acOpen) return;
-  if(e.key==='ArrowDown'){ e.preventDefault(); acIdx=Math.min(acIdx+1,acItems.length-1); acRender(); }
-  else if(e.key==='ArrowUp'){ e.preventDefault(); acIdx=Math.max(acIdx-1,0); acRender(); }
-  else if(e.key==='Enter'){ if(acIdx>=0){ e.preventDefault(); acPick(acIdx); } else acClose(); }
+  if(e.isComposing||composing) return;   // 组词中的 Enter 是选词，不触发搜索
+  if(e.key==='Enter'){
+    e.preventDefault();
+    if(acOpen&&acIdx>=0) acPick(acIdx); else acSearch();
+  }
+  else if(e.key==='ArrowDown'&&acOpen){ e.preventDefault(); acIdx=Math.min(acIdx+1,acItems.length-1); acRender(); }
+  else if(e.key==='ArrowUp'&&acOpen){ e.preventDefault(); acIdx=Math.max(acIdx-1,0); acRender(); }
   else if(e.key==='Escape'){ acClose(); }
 });
 songInp.addEventListener('blur', ()=> setTimeout(acClose, 150));
+$('#btnSongSearch').addEventListener('click', acSearch);
 
 /* ================= 设置 ================= */
 // 声线选择持久化（即时生效，无需保存按钮）
