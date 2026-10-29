@@ -25,7 +25,8 @@ class Scorer:
     def __init__(self, ckpt_path=None, mert_path=None, stats_path=None, device=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         if ckpt_path is None:
-            for cand in (ROOT / "models" / "singing_scorer_v1.pt",
+            for cand in (ROOT / "models" / "singing_scorer_v2.pt",
+                         ROOT / "models" / "singing_scorer_v1.pt",
                          ROOT / "runs" / "r3" / "best.pt"):
                 if cand.exists():
                     ckpt_path = cand
@@ -33,7 +34,7 @@ class Scorer:
         if ckpt_path is None:
             raise RuntimeError(
                 "未找到评分模型权重：请按 README「模型资产」下载 "
-                "singing_scorer_v1.pt 到 models/ 目录后重试")
+                "singing_scorer_v2.pt 到 models/ 目录后重试")
         if mert_path is None:
             local = ROOT / "models" / "MERT-v1-95M"
             mert_path = local if local.exists() else "m-a-p/MERT-v1-95M"
@@ -47,11 +48,14 @@ class Scorer:
         self.std = {(g, k): v[1] for g, d in stats.items() for k, v in d.items()}
         group_dims = {"prosody": len(PROSODY_KEYS), "timbre": len(TIMBRE_KEYS),
                       "pref": len(PREF_KEYS), "dm": 68, "fame": 2}
-        self.model = SingingAssessor(str(mert_path), group_dims)
         try:
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         except Exception:  # 旧版 torch 或 ckpt 含非张量对象时回退
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # B3 起的 ckpt 在 args 里带 n_faults；旧 ckpt 无此键 -> 0（无故障头）
+        n_faults = int((ckpt.get("args") or {}).get("n_faults", 0) or 0)
+        self.n_faults = n_faults
+        self.model = SingingAssessor(str(mert_path), group_dims, n_faults=n_faults)
         self.model.load_state_dict(ckpt["model"])
         self.model.eval().to(self.device)
 
@@ -91,14 +95,24 @@ class Scorer:
             f_dict[g] = torch.from_numpy(x).unsqueeze(0).to(self.device)
             m_dict[g] = torch.tensor([m], device=self.device)
         acc = {h: [] for h in HEADS}
+        facc = []
         for s in starts:
             w = torch.from_numpy(wav[s:s + WIN]).float()
             if pad:
                 w = torch.nn.functional.pad(w, (0, pad))
             wm = torch.zeros(WIN, dtype=torch.bool)
             wm[:min(n, WIN)] = True
-            out, _ = self.model(w.unsqueeze(0).to(self.device),
-                                wm.unsqueeze(0).to(self.device), f_dict, m_dict)
+            out, _, flog = self.model(w.unsqueeze(0).to(self.device),
+                                      wm.unsqueeze(0).to(self.device),
+                                      f_dict, m_dict)
             for h in HEADS:
                 acc[h].append(float(out[h].item()))
-        return {h: round(float(np.mean(v)), 2) for h, v in acc.items()}
+            if flog is not None:
+                facc.append(torch.sigmoid(flog[0]).float().cpu().numpy())
+        scores = {h: round(float(np.mean(v)), 2) for h, v in acc.items()}
+        if facc:
+            from src.model.heads import FAULT_TYPES
+            prob = np.mean(facc, axis=0)
+            scores["faults"] = {t: round(float(prob[i]), 3)
+                                for i, t in enumerate(FAULT_TYPES)}
+        return scores

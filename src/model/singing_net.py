@@ -16,7 +16,7 @@ from src.model.heads import GROUPS, HEADS
 
 class SingingAssessor(nn.Module):
     def __init__(self, mert_path, group_dims, d_audio=768, d_fuse=512,
-                 d_exp=128, freeze_layers=6, dropout=0.1):
+                 d_exp=128, freeze_layers=6, dropout=0.1, n_faults=0):
         super().__init__()
         from transformers import AutoModel
         # ModelScope 版自带 modeling_MERT.py（继承 HubertModel），需 trust_remote_code
@@ -47,6 +47,12 @@ class SingingAssessor(nn.Module):
         self.head_mlp = nn.Sequential(
             nn.Linear(d_fuse * 2, d_fuse), nn.GELU(), nn.Dropout(dropout))
         self.heads = nn.ModuleDict({h: nn.Linear(d_fuse, 1) for h in HEADS})
+        # B3 归因头：n_faults=0 时缺省不建（兼容 Stage A 旧 ckpt 严格加载）
+        self.n_faults = n_faults
+        if n_faults:
+            self.fault_head = nn.Sequential(
+                nn.Linear(d_fuse, d_fuse // 2), nn.GELU(), nn.Dropout(dropout),
+                nn.Linear(d_fuse // 2, n_faults))
 
     def forward(self, wav, wav_mask, feats, masks):
         """wav: [B,T] 24kHz; wav_mask: [B,T] bool; feats/masks: dict g->[B,d]/[B]"""
@@ -74,5 +80,7 @@ class SingingAssessor(nn.Module):
         fused = self.fuse_norm(fused.squeeze(1) + z_a)
 
         h = self.head_mlp(torch.cat([z_a, fused], dim=-1))
-        return {name: torch.sigmoid(head(h)).squeeze(-1) * 5.0
-                for name, head in self.heads.items()}, attn_w.squeeze(1)
+        scores = {name: torch.sigmoid(head(h)).squeeze(-1) * 5.0
+                  for name, head in self.heads.items()}
+        flog = self.fault_head(h) if self.n_faults else None
+        return scores, attn_w.squeeze(1), flog

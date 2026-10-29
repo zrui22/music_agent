@@ -25,7 +25,7 @@ from src.features.timbre import timbre_features
 from src.utils.audio import to_wav
 from src.agent import reference, matcher
 from src.agent.phrase import phrase_diagnostics, phrase_summary
-from src.model.heads import SR
+from src.model.heads import SR, FAULT_ZH, ACOUSTIC_FAULTS
 
 if TYPE_CHECKING:
     from src.agent.scorer import Scorer  # 重依赖（torch/MERT），仅类型注解用
@@ -226,10 +226,26 @@ def _diagnose_impl(audio_path: str, song, auto_match: bool, n_windows: int,
         "segments": segments,
         "phrases": phrases,  # 逐乐句诊断（B1）：每句音准/节奏/颤音/起音 + 故障标签
         "phrase_summary": phrase_summary(phrases) if phrases else None,  # 系统性问题聚合
+        "faults": _fault_hints(net.get("faults")),  # B3 神经网络故障疑点（语义类为主）
         "warnings": _warnings(match, objective, c_v, dur),
         "elapsed_s": round(time.time() - t_start, 1),
     }
     return result
+
+
+def _fault_hints(faults, prob_thr: float = 0.25, topk: int = 5):
+    """B3 故障头 -> 诊断疑点列表（按概率降序，标注是否声学可规则验证类）。"""
+    if not faults:
+        return None
+    items = sorted(faults.items(), key=lambda kv: -kv[1])
+    out = []
+    for fid, prob in items:
+        if prob < prob_thr or len(out) >= topk:
+            break
+        out.append({"type": fid, "zh": FAULT_ZH.get(fid, fid),
+                    "prob": round(float(prob), 3),
+                    "acoustic": fid in ACOUSTIC_FAULTS})
+    return out or None
 
 
 def _warnings(match, objective, c_v, diag_dur: float) -> list:

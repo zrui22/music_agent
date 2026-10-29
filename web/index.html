@@ -109,6 +109,10 @@ canvas.radar{width:200px;height:200px}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .chip{font-size:12px;padding:4px 12px;border-radius:99px;border:1px solid var(--line);background:none;color:var(--muted);transition:.15s}
 .chip:hover{border-color:var(--teal);color:var(--teal)}
+.chip.fault{cursor:default;background:var(--gold-soft);border-color:rgba(224,164,88,.45);color:var(--gold)}
+.chip.fault:hover{border-color:rgba(224,164,88,.45);color:var(--gold)}
+.chip.fault.semantic{background:var(--teal-soft);border-color:rgba(87,199,178,.45);color:var(--teal)}
+.chip.fault.semantic:hover{border-color:rgba(87,199,178,.45);color:var(--teal)}
 .eval .actions{margin-top:12px;display:flex;gap:8px}
 
 /* ---------- Composer ---------- */
@@ -572,6 +576,19 @@ function renderEval(diag){
     const w = document.createElement('div'); w.className='warns';
     w.innerHTML = diag.warnings.map(x=>`<div class="warn">⚠ ${esc(x)}</div>`).join('');
     card.appendChild(w);
+  }
+  // B3 神经网络故障疑点（语义类=网络独有观察，声学类=以逐句规则为准的旁证）
+  if(diag.faults && diag.faults.length){
+    const f = document.createElement('div'); f.className='chips';
+    f.innerHTML = '<span style="font-size:12px;color:var(--muted);align-self:center">🧠 网络疑点</span>';
+    diag.faults.forEach(t=>{
+      const b = document.createElement('span');
+      b.className = 'chip fault' + (t.acoustic ? '' : ' semantic');
+      b.textContent = `${t.zh} ${(t.prob*100|0)}%`;
+      b.title = t.acoustic ? '声学类故障：以逐句规则诊断为准确证' : '语义类故障：神经网络从专家评语中学到的疑点';
+      f.appendChild(b);
+    });
+    card.appendChild(f);
   }
   // 候选确认
   if(m.candidates && m.candidates.length){

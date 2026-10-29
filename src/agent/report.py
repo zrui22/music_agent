@@ -15,6 +15,8 @@ SYSTEM = """你是一位专业但亲切的声乐教练。给你一份 AI 系统�
 - segments: 逐唱段证据（时间区间、音分误差、对应原曲歌词）
 - phrases: 逐乐句诊断（每句含 score 0-100、pitch/rhythm 客观值、notes 逐音核对 {total,hit,hit_ratio,worst}（如 8 个音唱准 5 个）、vibrato_cover/vibrato_ref 颤音对比、wobble_cents 长音晃动、onset_rise_ms 起音毫秒、tail_fall_cents 尾音下滑、issues 故障标签列表含 type/severity/detail；focus=true 是最需优先练的句子）
 - phrase_summary: 全曲聚合（avg_score 均分、issue_counts 各故障出现次数、systemic 出现≥2句的反复问题——这是学员的系统性短板，必须在 practice_plan 里总结为本周主攻方向）
+- faults: 神经网络从海量专家评语中学到的"故障疑点"（每项含 zh 中文名、prob 概率 0-1、acoustic 是否声学类）。acoustic=true 的类以 phrases/objective 的规则证据为准，faults 仅作旁证；acoustic=false 的语义类（如 squeeze 挤卡、breath_leak 漏气、nasal 鼻音、emotion_flat 情感平、groove 律动）规则测不到，是网络独有的观察，prob≥0.5 时应当在评语中体现
+  faults 词表：chest_weak 胸声不足 / head_weak 头声虚弱 / mix_voice 混声换声区问题 / larynx_position 喉位问题 / resonance 共鸣位置 / breath_manage 换气气口 / over_sing 技巧堆砌 / range_stretch 超音域硬唱 / diction 咬字
   issues.type 词表：pitch_off 音准偏差 / octave_error 八度错误 / wrong_note 唱错音(单音偏差>100音分) / rhythm_drag 拖拍 / rhythm_rush 赶拍 / rhythm_unsteady 节奏不稳 / rhythm_late_entry 进句偏晚 / onset_search 音头没唱准后滑入 / flat_long_note 长音平直缺颤音 / wild_vibrato 颤音失控 / unsteady_pitch 长音音高晃动(气息支撑不足) / unsteady_volume 音量忽大忽小 / high_shout 高音靠喊 / falsetto_flip 换声断裂/躲假声 / soft_onset 起音偏软 / tail_fall 尾音下滑 / tail_short 尾音时值不足 / flat_dynamics 线条平缺少起伏
 - warnings: 系统告警
 
@@ -25,6 +27,7 @@ SYSTEM = """你是一位专业但亲切的声乐教练。给你一份 AI 系统�
 4. 语气鼓励为主，但问题要明确指出，不糊弄
 5. warnings 非空时，在报告开头说明数据可信度限制
 6. phrase_summary.systemic 非空时（同一故障反复出现≥2句），practice_plan 第一条必须是针对该系统性问题的「本周主攻方向」，并解释它如何影响了多个乐句
+7. faults 是弱监督学到的疑点而非确证：prob<0.4 的问题用"可能存在……迹象"的措辞，不要断言；若 faults 与 phrases 规则证据冲突，以规则为准
 
 输出 JSON：
 {
@@ -54,6 +57,7 @@ def build_report(diag: dict, model: str = None) -> dict:
         "segments": diag["segments"][:12],
         "phrases": slim_phrases,
         "phrase_summary": diag.get("phrase_summary"),
+        "faults": diag.get("faults"),
         "phrase_stats": {"total": len(diag.get("phrases") or []),
                          "shown_worst": len(slim_phrases)},
         "warnings": diag["warnings"],
