@@ -24,7 +24,7 @@ from src.features.prosody import prosody_features
 from src.features.timbre import timbre_features
 from src.utils.audio import to_wav
 from src.agent import reference, matcher
-from src.agent.phrase import phrase_diagnostics
+from src.agent.phrase import phrase_diagnostics, phrase_summary
 from src.model.heads import SR
 
 if TYPE_CHECKING:
@@ -225,6 +225,7 @@ def _diagnose_impl(audio_path: str, song, auto_match: bool, n_windows: int,
             "pitch": net["pitch"], "rhythm": net["rhythm"]},
         "segments": segments,
         "phrases": phrases,  # 逐乐句诊断（B1）：每句音准/节奏/颤音/起音 + 故障标签
+        "phrase_summary": phrase_summary(phrases) if phrases else None,  # 系统性问题聚合
         "warnings": _warnings(match, objective, c_v, dur),
         "elapsed_s": round(time.time() - t_start, 1),
     }

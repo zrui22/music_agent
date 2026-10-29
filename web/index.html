@@ -104,6 +104,8 @@ canvas.radar{width:200px;height:200px}
 .phrase .lyr{color:var(--ink);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .phrase .issue{font-size:11px;padding:1px 6px;border-radius:6px;background:rgba(232,90,90,.14);color:var(--red);white-space:nowrap;cursor:help}
 .phrase .issue.low{background:rgba(232,161,58,.14);color:#e8a13a}
+.segs .systemic{font-size:12px;color:var(--muted);background:rgba(232,161,58,.08);border:1px solid rgba(232,161,58,.25);border-radius:8px;padding:6px 10px;margin-bottom:6px}
+.segs .systemic b{color:#e8a13a}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .chip{font-size:12px;padding:4px 12px;border-radius:99px;border:1px solid var(--line);background:none;color:var(--muted);transition:.15s}
 .chip:hover{border-color:var(--teal);color:var(--teal)}
@@ -295,9 +297,12 @@ try{ const h = JSON.parse(localStorage.getItem('chat_history')||'[]'); if(Array.
 function saveHistory(){ try{ localStorage.setItem('chat_history', JSON.stringify(history.slice(-30))); }catch(e){} }
 function clearMemory(){ history = []; saveHistory(); toast('对话记忆已清空'); }
 const LABELS = {pitch:'音准',rhythm:'节奏',stability:'气息稳定',timbre:'音色',expression:'表现力',overall:'综合'};
-const ISSUE_LABEL = {pitch_off:'音准偏差', octave_error:'八度问题', rhythm_drag:'拖拍', rhythm_rush:'赶拍',
-  rhythm_unsteady:'节奏不稳', flat_long_note:'长音平直', wild_vibrato:'颤音失控',
-  unsteady_pitch:'音高晃动', unsteady_volume:'音量不稳', soft_onset:'起音偏软', tail_fall:'尾音下滑'};
+const ISSUE_LABEL = {pitch_off:'音准偏差', octave_error:'八度问题', wrong_note:'唱错音',
+  rhythm_drag:'拖拍', rhythm_rush:'赶拍', rhythm_unsteady:'节奏不稳', rhythm_late_entry:'进句偏晚',
+  onset_search:'音头找音', flat_long_note:'长音平直', wild_vibrato:'颤音失控',
+  unsteady_pitch:'音高晃动', unsteady_volume:'音量不稳', high_shout:'高音喊叫',
+  falsetto_flip:'换声断裂', soft_onset:'起音偏软', tail_fall:'尾音下滑',
+  tail_short:'尾音时值不足', flat_dynamics:'线条偏平'};
 
 /* ================= LLM 调用（默认经评测后端无状态中转，Key 只存本机、后端不落地；后端不可达时回退浏览器直连） ================= */
 const PERSONA = `你是一位经验丰富、鼓励为主的声乐教练「陪教」。用户是业余唱歌爱好者。
@@ -587,11 +592,19 @@ function renderEval(diag){
       const cls = p.score<60?'bad':(p.score<85?'mid':'good');
       const tags = (p.issues||[]).slice(0,2).map(i=>
         `<span class="issue ${i.severity==='low'?'low':''}" title="${esc(i.detail||'')}">${esc(ISSUE_LABEL[i.type]||i.type)}</span>`).join('');
+      const notes = p.notes?`<span class="issue low" title="逐音核对：${p.notes.total} 个音唱准 ${p.notes.hit} 个">${p.notes.hit}/${p.notes.total}音</span>`:'';
       return `<div class="phrase"><span class="t">${p.start_s.toFixed(1)}s</span>
         <span class="psc ${cls}">${p.score}</span>
-        <span class="lyr">${esc(p.lyric||'')}${p.focus?' 🔥':''}</span>${tags}</div>`;
+        <span class="lyr">${esc(p.lyric||'')}${p.focus?' 🔥':''}</span>${tags}${notes}</div>`;
     }).join('');
-    s.innerHTML = `<h4>🩺 逐句诊断（共 ${diag.phrases.length} 句 · 悬停标签看详情 · 🔥 优先练习）</h4>${rows}`;
+    // 系统性问题汇总行：同一故障反复出现≥2句时提示主攻方向
+    const ps = diag.phrase_summary;
+    let sysLine = '';
+    if(ps && ps.systemic && ps.systemic.length){
+      const parts = ps.systemic.map(t=>`${ISSUE_LABEL[t]||t}×${ps.issue_counts[t]||0}`);
+      sysLine = `<div class="systemic">⚠️ 反复出现的问题：<b>${esc(parts.join('、'))}</b>——这是本周主攻方向</div>`;
+    }
+    s.innerHTML = `<h4>🩺 逐句诊断（共 ${diag.phrases.length} 句 · 悬停标签看详情 · 🔥 优先练习）</h4>${sysLine}${rows}`;
     card.appendChild(s);
   } else if(diag.segments && diag.segments.length){
     const s = document.createElement('div'); s.className='segs';

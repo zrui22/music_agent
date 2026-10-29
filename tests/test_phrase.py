@@ -116,3 +116,50 @@ def test_flat_long_note_vs_ref_vibrato(tmp_path):
     view2.rm[:] = 60 + 0.5 * np.sin(2 * np.pi * 5.5 * t)
     ph2 = phrase_diagnostics(view2, [(0.0, "长音句")], str(wav), global_slope=1.0)
     assert ph2 and "flat_long_note" not in [i["type"] for i in ph2[0]["issues"]]
+
+
+def test_wrong_note_detection(tmp_path):
+    """ref 切成 8 个交替单音，cover 有一个音偏高 150 音分 -> wrong_note + 命中率<1。"""
+    wav = tmp_path / "f.wav"
+    _mk_wav(wav)
+    view = _mk_view()
+    view.cv[:] = True
+    seg = 50  # 2.5s 一个音，60/64 交替
+    for k in range(8):
+        if k % 2 == 1:
+            view.rm[k * seg:(k + 1) * seg] = 64.0
+    view.cm[:] = view.rm
+    view.cm[250:300] += 1.5  # 12.5-15s（第二句内）这个音高了一个半半音
+    ph = phrase_diagnostics(view, LRC, str(wav), global_slope=1.0)
+    second = ph[1]
+    assert "wrong_note" in [i["type"] for i in second["issues"]]
+    nh = second["notes"]
+    assert nh is not None and nh["total"] >= 3
+    assert nh["hit"] == nh["total"] - 1 and nh["worst"][0]["direction"] == "偏高"
+    # 第一句全唱准 -> 无 wrong_note
+    assert "wrong_note" not in [i["type"] for i in ph[0]["issues"]]
+
+
+def test_late_entry(tmp_path):
+    """第二句开头帧映射到 ref 10.8s -> 进句晚 -> rhythm_late_entry。"""
+    wav = tmp_path / "g.wav"
+    _mk_wav(wav)
+    view = _mk_view()
+    view.cv[:] = True
+    for k in range(5):
+        view.mapping[200 + k] = 216 + k  # 0.9s 的映射偏移
+    ph = phrase_diagnostics(view, LRC, str(wav), global_slope=1.0)
+    assert ph[1]["entry_late_s"] is not None and ph[1]["entry_late_s"] >= 0.35
+    assert "rhythm_late_entry" in [i["type"] for i in ph[1]["issues"]]
+
+
+def test_phrase_summary_aggregation():
+    from src.agent.phrase import phrase_summary
+    phrases = [{"score": 50, "issues": [{"type": "tail_fall"}, {"type": "pitch_off"}]},
+               {"score": 60, "issues": [{"type": "tail_fall"}]},
+               {"score": 90, "issues": []}]
+    s = phrase_summary(phrases)
+    assert s["total"] == 3 and abs(s["avg_score"] - 66.7) < 0.2
+    assert s["issue_counts"]["tail_fall"] == 2
+    assert "tail_fall" in s["systemic"] and "pitch_off" not in s["systemic"]
+    assert phrase_summary([])["total"] == 0
