@@ -349,7 +349,7 @@ async def api_tts(req: Request):
         body = await req.json()
     except Exception:
         return JSONResponse({"error": "请求体不是 JSON"}, 400)
-    text = str(body.get("text") or "").strip()[:280]
+    text = str(body.get("text") or "").strip()[:600]
     if not text:
         return JSONResponse({"error": "text 为空"}, 400)
     voice = str(body.get("voice") or "")

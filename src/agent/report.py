@@ -13,12 +13,14 @@ SYSTEM = """你是一位专业但亲切的声乐教练。给你一份 AI 系统�
 - objective.rhythm: 节奏真值（tempo_ratio 局部速度比，>1.05 拖拍 <0.95 赶拍；timing_jitter_ms 节奏抖动毫秒；rhythm_ref 0-5 换算分）
 - subjective: 神经网络主观维度分（stability 气息稳定 / timbre 音色 / expression 表现力 / overall 综合，0-5）
 - segments: 逐唱段证据（时间区间、音分误差、对应原曲歌词）
+- phrases: 逐乐句诊断（每句含 score 0-100、pitch/rhythm 客观值、vibrato_cover/vibrato_ref 颤音对比、wobble_cents 长音晃动、onset_rise_ms 起音毫秒、tail_fall_cents 尾音下滑、issues 故障标签列表含 type/severity/detail；focus=true 是最需优先练的句子）
+  issues.type 词表：pitch_off 音准偏差 / octave_error 八度错误 / rhythm_drag 拖拍 / rhythm_rush 赶拍 / rhythm_unsteady 节奏不稳 / flat_long_note 长音平直缺颤音 / wild_vibrato 颤音失控 / unsteady_pitch 长音音高晃动(气息支撑不足) / unsteady_volume 音量忽大忽小 / soft_onset 起音偏软 / tail_fall 尾音下滑
 - warnings: 系统告警
 
 要求：
-1. 只基于数据说话，客观维度以 objective 为准，不要引用 network_objective_fallback 除非 objective 缺失
-2. 指出具体问题时引用时间段和歌词（如"0:23-0:31『xxx』这句音分误差 45"）
-3. 每个问题给出一个可执行的练习建议
+1. 只基于数据说话，客观维度以 objective 与 phrases 为准，不要引用 network_objective_fallback 除非 objective 缺失
+2. 指出具体问题时引用时间段和歌词（如"0:23-0:31『xxx』这句音分误差 45"），优先讲 focus=true 的句子
+3. 每个问题给出一个可执行的练习建议，练习要对应故障类型（如 tail_fall→句尾保持气息支撑，soft_onset→先闭声带再给气）
 4. 语气鼓励为主，但问题要明确指出，不糊弄
 5. warnings 非空时，在报告开头说明数据可信度限制
 
@@ -33,13 +35,23 @@ SYSTEM = """你是一位专业但亲切的声乐教练。给你一份 AI 系统�
 
 def build_report(diag: dict, model: str = None) -> dict:
     """diagnose() 结果 -> 导师报告（结构化 JSON）。"""
-    # 压缩输入，只保留 LLM 需要理解的字段
+    # 压缩输入，只保留 LLM 需要理解的字段；phrases 按分数升序取最差 12 句（重点证据）
+    phrases = sorted(diag.get("phrases") or [], key=lambda p: p.get("score", 100))
+    slim_phrases = [{
+        "start_s": p["start_s"], "end_s": p["end_s"], "lyric": p.get("lyric", ""),
+        "score": p.get("score"), "focus": bool(p.get("focus")),
+        "signed_cents": p.get("signed_cents"),
+        "issues": p.get("issues") or [],
+    } for p in phrases[:12]]
     compact = {
         "duration_s": diag["duration_s"],
         "match": diag["match"],
         "objective": diag["objective"],
         "subjective": diag["subjective"],
         "segments": diag["segments"][:12],
+        "phrases": slim_phrases,
+        "phrase_stats": {"total": len(diag.get("phrases") or []),
+                         "shown_worst": len(slim_phrases)},
         "warnings": diag["warnings"],
     }
     if compact["match"].get("candidates"):

@@ -97,6 +97,13 @@ canvas.radar{width:200px;height:200px}
 .seg{font-size:12.5px;color:var(--muted);padding:3px 0;display:flex;gap:8px}
 .seg .t{color:var(--teal);font-variant-numeric:tabular-nums}
 .seg .cents.bad{color:var(--red)}
+.phrase{display:flex;gap:8px;align-items:baseline;font-size:12.5px;color:var(--muted);padding:4px 0;border-bottom:1px dashed rgba(128,128,128,.14)}
+.phrase .t{color:var(--teal);font-variant-numeric:tabular-nums;min-width:38px}
+.phrase .psc{font-variant-numeric:tabular-nums;font-weight:600;min-width:30px;text-align:right}
+.phrase .psc.bad{color:var(--red)} .phrase .psc.mid{color:#e8a13a} .phrase .psc.good{color:var(--teal)}
+.phrase .lyr{color:var(--ink);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.phrase .issue{font-size:11px;padding:1px 6px;border-radius:6px;background:rgba(232,90,90,.14);color:var(--red);white-space:nowrap;cursor:help}
+.phrase .issue.low{background:rgba(232,161,58,.14);color:#e8a13a}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .chip{font-size:12px;padding:4px 12px;border-radius:99px;border:1px solid var(--line);background:none;color:var(--muted);transition:.15s}
 .chip:hover{border-color:var(--teal);color:var(--teal)}
@@ -288,11 +295,16 @@ try{ const h = JSON.parse(localStorage.getItem('chat_history')||'[]'); if(Array.
 function saveHistory(){ try{ localStorage.setItem('chat_history', JSON.stringify(history.slice(-30))); }catch(e){} }
 function clearMemory(){ history = []; saveHistory(); toast('对话记忆已清空'); }
 const LABELS = {pitch:'音准',rhythm:'节奏',stability:'气息稳定',timbre:'音色',expression:'表现力',overall:'综合'};
+const ISSUE_LABEL = {pitch_off:'音准偏差', octave_error:'八度问题', rhythm_drag:'拖拍', rhythm_rush:'赶拍',
+  rhythm_unsteady:'节奏不稳', flat_long_note:'长音平直', wild_vibrato:'颤音失控',
+  unsteady_pitch:'音高晃动', unsteady_volume:'音量不稳', soft_onset:'起音偏软', tail_fall:'尾音下滑'};
 
 /* ================= LLM 调用（默认经评测后端无状态中转，Key 只存本机、后端不落地；后端不可达时回退浏览器直连） ================= */
 const PERSONA = `你是一位经验丰富、鼓励为主的声乐教练「陪教」。用户是业余唱歌爱好者。
 1. 回答声乐技巧、练声方法、选歌建议等问题，具体可执行，不空谈；
 2. 用户发来 [评测结果] JSON 时，翻译成通俗中文点评：先一句话总评，再逐维说问题（低于 3.5 的重点说），最后给 2-3 条本周练习建议；warnings 要如实转达；
+   JSON 里的 phrases 是逐句诊断（score 0-100、signed_cents 正=偏高负=偏低、issues 故障标签含 detail 详情）——优先讲分数最低、带 focus 的句子，引用具体时间和歌词；
+   issues.type 含义：pitch_off 音准偏差 / octave_error 八度错误 / rhythm_drag 拖拍 / rhythm_rush 赶拍 / rhythm_unsteady 节奏不稳 / flat_long_note 长音缺颤音 / wild_vibrato 颤音失控 / unsteady_pitch 气息支撑不足音高晃 / unsteady_volume 音量忽大忽小 / soft_onset 起音偏软 / tail_fall 尾音下滑；
 3. 语气亲切专业，像真人教练，用比喻，不暴露 JSON 字段名。分数均为 0-5 分制。`;
 
 function llmCfg(){
@@ -378,38 +390,82 @@ function setSong(s){
   $('#songInp').value = curSong;
 }
 
-/* ================= TTS 朗读（优先后端 edge-tts 二次元声线，失败回退浏览器 TTS） ================= */
+/* ================= TTS 朗读（分句队列：边播边预取下一段，长回复完整读完） ================= */
 window.avatarSpeaking = false;
-let ttsAudio = null;
-async function speakText(text){
-  if(!$('#ttsOn')?.checked) return;
+let ttsAudio = null, ttsGen = 0;
+function stopSpeak(){
+  ttsGen++;                                   // 使进行中的队列失效
+  if('speechSynthesis' in window) speechSynthesis.cancel();
+  if(ttsAudio){ try{ ttsAudio.pause(); }catch(e){} ttsAudio = null; }
+  window.avatarSpeaking = false;
+}
+function splitForTTS(text, maxLen=120){
   const clean = String(text).replace(/```[\s\S]*?```/g,'。').replace(/[*#`>\[\]]/g,'')
     .replace(/^[-·]\s*/gm,'').replace(/\s*\n+\s*/g,'。').replace(/[ \t]+/g,' ')
-    .replace(/。{2,}/g,'。').trim().replace(/^[。 ]+|[。 ]+$/g,'').slice(0,280);
-  if(!clean) return;
-  if('speechSynthesis' in window) speechSynthesis.cancel();
-  if(ttsAudio){ try{ ttsAudio.pause(); }catch(e){} ttsAudio = null; window.avatarSpeaking = false; }
-  // 首选：后端 edge-tts（微软在线声线，无 Key），与 3D 形象适配的少女音
-  try{
-    const voice = localStorage.getItem('ttsVoice') || 'paimon';
-    const r = await fetch(apiBase()+'/api/tts', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:clean, voice})});
-    if(!r.ok) throw new Error('tts '+r.status);
-    const url = URL.createObjectURL(await r.blob());
+    .replace(/。{2,}/g,'。').trim().replace(/^[。 ]+|[。 ]+$/g,'');
+  if(!clean) return [];
+  const parts = clean.match(/[^。！？；!?；]+[。！？；!?]*/g) || [clean];
+  const chunks = []; let cur = '';
+  for(const s of parts){
+    if(cur && (cur+s).length > maxLen){ chunks.push(cur); cur = s; }
+    else cur += s;
+  }
+  if(cur) chunks.push(cur);
+  const out = [];
+  for(const c of chunks){                 // 超长句硬切（按 maxLen 切段）
+    if(c.length <= maxLen*1.5){ out.push(c); continue; }
+    for(let i=0;i<c.length;i+=maxLen) out.push(c.slice(i, i+maxLen));
+  }
+  return out.filter(Boolean);
+}
+function playUrl(url, gen){
+  return new Promise(res=>{
+    if(gen!==ttsGen){ res(false); return; }
     const au = ttsAudio = new Audio(url);
-    au.onplay  = ()=>{ if(ttsAudio===au) window.avatarSpeaking = true; };
-    au.onended = au.onerror = ()=>{ if(ttsAudio===au){ window.avatarSpeaking=false; ttsAudio=null; } URL.revokeObjectURL(url); };
-    await au.play();
-    return;
-  }catch(e){ /* 后端不通或 edge-tts 不可用 → 回退浏览器内置 TTS */ }
+    au.onended = ()=>{ if(ttsAudio===au) ttsAudio=null; res(true); };
+    au.onerror = ()=>{ if(ttsAudio===au) ttsAudio=null; res(false); };
+    au.play().catch(()=>res(false));
+  });
+}
+function speakBrowser(chunks, gen){        // 浏览器内置 TTS 兜底（同样分句串行，避开长文本中断 bug）
   if(!('speechSynthesis' in window)) return;
-  const u = new SpeechSynthesisUtterance(clean);
-  u.lang = 'zh-CN'; u.rate = 1.12; u.pitch = 1.35;   // 回退也尽量贴近少女感
   const zh = speechSynthesis.getVoices().find(v=>/zh|中文|Chinese/i.test(v.lang+' '+v.name));
-  if(zh) u.voice = zh;
   window.avatarSpeaking = true;
-  u.onend = u.onerror = ()=>{ window.avatarSpeaking = false; };
-  speechSynthesis.speak(u);
+  let i = 0;
+  const next = ()=>{
+    if(gen!==ttsGen || i>=chunks.length){ if(gen===ttsGen) window.avatarSpeaking=false; return; }
+    const u = new SpeechSynthesisUtterance(chunks[i++]);
+    u.lang='zh-CN'; u.rate=1.12; u.pitch=1.35;
+    if(zh) u.voice=zh;
+    u.onend = u.onerror = ()=>next();
+    speechSynthesis.speak(u);
+  };
+  next();
+}
+async function speakText(text){
+  if(!$('#ttsOn')?.checked) return;
+  stopSpeak();
+  const chunks = splitForTTS(text);
+  if(!chunks.length) return;
+  const gen = ++ttsGen;
+  const voice = localStorage.getItem('ttsVoice') || 'paimon';
+  const fetchChunk = (i)=>fetch(apiBase()+'/api/tts', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:chunks[i], voice})})
+    .then(r=>{ if(!r.ok) throw new Error('tts '+r.status); return r.blob(); })
+    .then(b=>URL.createObjectURL(b));
+  let pending = fetchChunk(0);
+  try{ await pending; }catch(e){ speakBrowser(chunks, gen); return; }  // 后端不通→浏览器 TTS
+  window.avatarSpeaking = true;
+  for(let i=0; i<chunks.length; i++){
+    if(gen!==ttsGen){ pending.then(u=>URL.revokeObjectURL(u)).catch(()=>{}); return; }
+    let url;
+    try{ url = await pending; }catch(e){ break; }
+    pending = (i+1<chunks.length) ? fetchChunk(i+1) : null;   // 播放当前段的同时预取下一段
+    const ok = await playUrl(url, gen);
+    URL.revokeObjectURL(url);
+    if(!ok || gen!==ttsGen) return;
+  }
+  if(gen===ttsGen) window.avatarSpeaking=false;
 }
 /* 3D 形象兜底提示：10 秒后仍未就绪则说明资源未加载 */
 setTimeout(()=>{
@@ -524,8 +580,20 @@ function renderEval(diag){
     });
     card.appendChild(c);
   }
-  // 问题片段
-  if(diag.segments && diag.segments.length){
+  // 逐句诊断（B1 乐句级）：有 phrases 优先展示，否则退回旧的 segments
+  if(diag.phrases && diag.phrases.length){
+    const s = document.createElement('div'); s.className='segs';
+    const rows = diag.phrases.map(p=>{
+      const cls = p.score<60?'bad':(p.score<85?'mid':'good');
+      const tags = (p.issues||[]).slice(0,2).map(i=>
+        `<span class="issue ${i.severity==='low'?'low':''}" title="${esc(i.detail||'')}">${esc(ISSUE_LABEL[i.type]||i.type)}</span>`).join('');
+      return `<div class="phrase"><span class="t">${p.start_s.toFixed(1)}s</span>
+        <span class="psc ${cls}">${p.score}</span>
+        <span class="lyr">${esc(p.lyric||'')}${p.focus?' 🔥':''}</span>${tags}</div>`;
+    }).join('');
+    s.innerHTML = `<h4>🩺 逐句诊断（共 ${diag.phrases.length} 句 · 悬停标签看详情 · 🔥 优先练习）</h4>${rows}`;
+    card.appendChild(s);
+  } else if(diag.segments && diag.segments.length){
     const s = document.createElement('div'); s.className='segs';
     s.innerHTML = '<h4>🎯 问题片段（音分偏差偏大的乐句）</h4>' + diag.segments.slice(0,5).map(g=>
       `<div class="seg"><span class="t">${g.start_s?.toFixed(1)}s</span>
@@ -588,8 +656,19 @@ async function coachReview(diag){
   const typing = addTyping();
   window.avatarAPI?.status('正在组织点评…');
   window.avatarAPI?.state('thinking');
-  // 评测 JSON 完整入历史（约 1-2KB）——后续追问才能记得住分数；audio 是服务器临时路径，不发给外部 LLM
-  const content = '[评测结果] '+JSON.stringify(diag, (k,v)=>(k==='segments'||k==='audio')?undefined:v);
+  // 评测 JSON 入历史——后续追问才能记得住分数；audio 是服务器临时路径，不发给外部 LLM；
+  // phrases 只保留最差 8 句的精简版（时间/歌词/分数/故障标签），控制 token 体量
+  const slim = {...diag};
+  delete slim.audio; delete slim.segments;
+  if(Array.isArray(diag.phrases) && diag.phrases.length){
+    slim.phrases = [...diag.phrases].sort((a,b)=>a.score-b.score).slice(0,8).map(p=>({
+      start_s:p.start_s, end_s:p.end_s, lyric:p.lyric, score:p.score,
+      signed_cents:p.signed_cents,
+      issues:(p.issues||[]).map(i=>({type:i.type, severity:i.severity, detail:i.detail})),
+    }));
+    slim.phrase_total = diag.phrases.length;
+  }
+  const content = '[评测结果] '+JSON.stringify(slim);
   history.push({role:'user', content});
   saveHistory();
   try{

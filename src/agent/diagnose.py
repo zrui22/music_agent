@@ -24,6 +24,7 @@ from src.features.prosody import prosody_features
 from src.features.timbre import timbre_features
 from src.utils.audio import to_wav
 from src.agent import reference, matcher
+from src.agent.phrase import phrase_diagnostics
 from src.model.heads import SR
 
 if TYPE_CHECKING:
@@ -178,7 +179,7 @@ def _diagnose_impl(audio_path: str, song, auto_match: bool, n_windows: int,
                      "candidates": slim}
 
     # --- 客观分（有参考时） ---
-    objective, pref, segments = None, {}, []
+    objective, pref, segments, phrases = None, {}, [], []
     if ref is not None:
         r_t, r_m, r_v = ref["f0"]
         ks = estimate_key_shift(c_m, c_v, r_m, r_v)
@@ -198,6 +199,11 @@ def _diagnose_impl(audio_path: str, song, auto_match: bool, n_windows: int,
                 pref.update({k: rs[k] for k in ("tempo_ratio", "timing_jitter_ms")})
             objective = {"pitch": ps, "rhythm": rs}
             segments = _segment_evidence(view, ref.get("lrc") or [])
+            try:
+                phrases = phrase_diagnostics(view, ref.get("lrc") or [],
+                                             str(wav24), g_slope)
+            except Exception:
+                phrases = []
 
     # --- 网络主观分 ---
     # --- 网络主观分（Scorer 懒加载：torch/MERT 只在真正评分时才引入） ---
@@ -218,6 +224,7 @@ def _diagnose_impl(audio_path: str, song, auto_match: bool, n_windows: int,
         "network_objective_fallback": {  # 免参考兜底/交叉校验，非常规呈现
             "pitch": net["pitch"], "rhythm": net["rhythm"]},
         "segments": segments,
+        "phrases": phrases,  # 逐乐句诊断（B1）：每句音准/节奏/颤音/起音 + 故障标签
         "warnings": _warnings(match, objective, c_v, dur),
         "elapsed_s": round(time.time() - t_start, 1),
     }
