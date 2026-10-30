@@ -151,14 +151,13 @@ def fetch_by_key(source: str, key: str, query: str, name: str, artists: str,
     return _assemble(d)
 
 
-def _align_cost(cover_f0, ref_f0_tuple) -> tuple:
+def _align_cost(cover_f0, ref_f0_tuple, lrc=None) -> tuple:
     """cover 对某参考版本的对齐代价与有效帧数；失败返回 (inf, 0)。"""
-    from src.pitchref.align import estimate_key_shift, align_multi
+    from src.pitchref.align import align_best
     c_t, c_m, c_v = cover_f0
     r_t, r_m, r_v = ref_f0_tuple
     try:
-        ks = estimate_key_shift(c_m, c_v, r_m, r_v)
-        view = align_multi(c_t, c_m - ks, c_v, r_t, r_m, r_v)
+        view, ks = align_best(c_t, c_m, c_v, r_t, r_m, r_v, lrc=lrc)
     except Exception:
         return float("inf"), 0, 0
     if view is None or len(view.ct) < 100:
@@ -183,7 +182,7 @@ def resolve_best_version(song: str, cover_f0, cover_dur_s: float = 0,
         if ref is None or str(ref["dir"]) in seen_dirs:
             return
         seen_dirs.add(str(ref["dir"]))
-        cost, n_frames, ks = _align_cost(cover_f0, ref["f0"])
+        cost, n_frames, ks = _align_cost(cover_f0, ref["f0"], ref.get("lrc"))
         tried.append({"ref_id": tag, "artists": ref.get("artists"),
                       "cost": round(cost, 3) if np.isfinite(cost) else None,
                       "n_frames": n_frames})

@@ -8,12 +8,26 @@ clip 内帧级音分误差 / 八度错误 / DTW路标节奏指标聚合。
 无法回跳，会在结构差异处"漂"出垃圾对齐（实测 cover 196s 被压进 ref 5-99s）。
 每段独立对齐后，两遍副歌各自匹配最优原曲区间，结构差异天然免疫。
 """
+import re
+
 import numpy as np
 
 
 def estimate_key_shift(cover_midi: np.ndarray, cover_voiced: np.ndarray,
                        ref_midi: np.ndarray, ref_voiced: np.ndarray) -> int:
     """12 音级直方图相关峰估计翻唱升降 key（半音数 -6..+6）。"""
+    return estimate_key_shift_topk(cover_midi, cover_voiced, ref_midi, ref_voiced,
+                                   topk=1)[0][0]
+
+
+def estimate_key_shift_topk(cover_midi: np.ndarray, cover_voiced: np.ndarray,
+                            ref_midi: np.ndarray, ref_voiced: np.ndarray,
+                            topk: int = 3) -> list:
+    """top-k 调差候选 [(ks, 相关分)] 按分降序，符号同 estimate_key_shift。
+
+    单峰直方图在短唱段（15-30s）直方图稀疏，易混淆五度/关系大小调
+    （matcher._ks_topk 同款失败模式），返回多个候选供对齐层投票。
+    """
     def hist12(midi, voiced):
         h = np.zeros(12)
         pc = np.mod(np.round(midi[voiced]).astype(int), 12)
@@ -22,12 +36,42 @@ def estimate_key_shift(cover_midi: np.ndarray, cover_voiced: np.ndarray,
         return h / max(h.sum(), 1)
 
     hc, hr = hist12(cover_midi, cover_voiced), hist12(ref_midi, ref_voiced)
-    best_k, best_s = 0, -2.0
-    for k in range(-6, 7):
-        s = np.corrcoef(np.roll(hr, k), hc)[0, 1] if hc.std() > 0 and hr.std() > 0 else 0
-        if s > best_s:
-            best_s, best_k = s, k
-    return best_k  # cover + (-best_k) ≈ ref 调；即 cover_midi - best_k 与 ref 同调
+    if hc.std() == 0 or hr.std() == 0:
+        return [(0, 0.0)]
+    scored = [(k, float(np.corrcoef(np.roll(hr, k), hc)[0, 1]))
+              for k in range(-6, 7)]
+    scored.sort(key=lambda x: -x[1])
+    return scored[:topk]
+
+
+_CREDIT_RE = re.compile(
+    r"[：:]|录音|混音|制作|作词|作曲|编曲|监制|吉他|贝斯|鼓|键盘|和声|出品|发行|"
+    r"词\s|曲\s|OP\b|SP\b", re.I)
+
+
+def vocal_mask_from_lrc(lrc, ref_times, pre_s: float = 0.3,
+                        post_s: float = 0.2, tail_s: float = 8.0) -> np.ndarray:
+    """LRC 歌词行时间窗 -> ref 帧级人声掩码（True=保留）。
+
+    伴奏/间奏段 Praat 常把器乐误判为 voiced（实测《十年》前奏 0-10s 纯器乐段
+    voiced 占比 0.80-0.92），这些帧污染调差直方图，并在 DTW 里充当错误锚点。
+    只保留歌词行窗 [行首-pre_s, 下一行首+post_s] 内的帧；含冒号/制作名单关键词
+    的 credits 行不算歌词窗。无有效歌词行时返回全 True（不掩码）。
+    """
+    mask = np.ones(len(ref_times), dtype=bool)
+    if not lrc or len(ref_times) == 0:
+        return mask
+    lines = sorted((float(t), str(x)) for t, x in lrc)
+    lines = [(t, x) for t, x in lines if x.strip() and not _CREDIT_RE.search(x)]
+    if not lines:
+        return mask
+    mask[:] = False
+    rt = np.asarray(ref_times)
+    starts = [t for t, _ in lines]
+    for i, (t0, _) in enumerate(lines):
+        t1 = starts[i + 1] if i + 1 < len(starts) else t0 + tail_s
+        mask |= (rt >= t0 - pre_s) & (rt <= t1 + post_s)
+    return mask
 
 
 def _downsample(times, midi, voiced, step_s=0.05):
@@ -64,7 +108,7 @@ class SubseqDTW:
         self.ct, self.cm, self.cv = _downsample(cover_times, cover_midi, cover_voiced, step_s)
         self.rt, self.rm, self.rv = _downsample(ref_times, ref_midi, ref_voiced, step_s)
 
-    def run(self, gap_pen=1.5, step_pen=0.15):
+    def run(self, gap_pen=1.5, step_pen=0.15, ref_t0=None, ref_t1=None):
         """反传动线向量化 DTW：同一反对角线上的格子互不依赖，numpy 整行算。
 
         step_pen: 非对角步（横/纵走）的加性罚分（半音/帧）。circular 音级距离是
@@ -72,8 +116,18 @@ class SubseqDTW:
         压进 ref 94s）。加性罚分线性惩罚无谓摆动，真实的速度差仍可通过少量
         非对角步表达。注意不能用乘性偏置：驻留同列时罚约每帧复合增长，
         长段会指数爆炸（实测 1.2^204≈1e16 污染整行）。
+
+        ref_t0/ref_t1: 限制 ref 搜索窗（秒，重锚定用），返回的 mapping 仍是
+        全曲 ref 网格下标。
         """
         cm, cv, rm, rv = self.cm, self.cv, self.rm, self.rv
+        offset = 0
+        if ref_t0 is not None and ref_t1 is not None:
+            w = (self.rt >= ref_t0) & (self.rt <= ref_t1)
+            if not w.any():
+                return np.full(len(cm), -1), np.inf
+            offset = int(np.argmax(w))
+            rm, rv = rm[w], rv[w]
         n, m = len(cm), len(rm)
         if n == 0 or m == 0:
             return np.full(n, -1), np.inf
@@ -102,6 +156,8 @@ class SubseqDTW:
                      (D[i - 1, j] + step_pen, i - 1, j),
                      (D[i, j - 1] + step_pen, i, j - 1)]
             _, i, j = min(steps, key=lambda s: s[0])
+        if offset:
+            mapping[mapping >= 0] += offset
         return mapping, best_cost
 
 
@@ -185,6 +241,137 @@ def align_multi(c_times, c_midi, c_voiced, r_times, r_midi, r_voiced,
     bounds = np.cumsum([0] + [len(a) for a in maps])
     return AlignedView(np.concatenate(cts), np.concatenate(cms), np.concatenate(cvs),
                        rm, rv, np.concatenate(maps), step_s, bounds, costs)
+
+
+def _wmedian(x, w):
+    idx = np.argsort(x)
+    x, w = np.asarray(x)[idx], np.asarray(w, dtype=float)[idx]
+    cw = np.cumsum(w)
+    return float(x[min(np.searchsorted(cw, 0.5 * cw[-1]), len(x) - 1)])
+
+
+def reanchor_segments(view: AlignedView, c_times, c_midi, c_voiced,
+                      r_times, r_midi, r_voiced, dev_thr_s=8.0, win_s=6.0,
+                      improve=0.15, max_cost=2.5) -> AlignedView:
+    """全局顺序一致性重锚定。
+
+    逐段独立 DTW 无顺序约束：主歌/副歌同调、音级集合相似时，个别乐句会锁进
+    副歌（用户按顺序唱时该落点物理上不可能）。用全体段落点拟合 cover→ref
+    主趋势（斜率取全局路标斜率，截距取帧数加权中位数，抗离群），偏离
+    >dev_thr 的段在 [趋势预测±win] 限制窗内重跑 SubseqDTW，代价改善
+    >=improve 才接受——用户真乱序唱且唱得准时代价不会改善，不会被强制搬家。
+
+    c_midi 必须是已平移调（与 view 生成时一致）的版本。
+    """
+    nseg = len(view.bounds) - 1
+    if nseg < 3:
+        return view
+    rt, _, _ = _downsample(r_times, r_midi, r_voiced, view.step)
+    if len(rt) == 0:
+        return view
+    seg_ids, c_mid, r_mid, w, costs = [], [], [], [], []
+    for i in range(nseg):
+        lo, hi = view.bounds[i], view.bounds[i + 1]
+        mp = view.mapping[lo:hi]
+        ok = mp[mp >= 0]
+        if len(ok) < 10:
+            continue
+        seg_ids.append(i)
+        c_mid.append(0.5 * (view.ct[lo] + view.ct[hi - 1]))
+        r_mid.append(float(rt[int(np.median(ok))]))
+        w.append(hi - lo)
+        costs.append(view.seg_costs[i][0])
+    if len(seg_ids) < 3:
+        return view
+    a = global_mapping_slope(view)
+    if not (0.2 < a < 5):
+        a = 1.0
+    b = _wmedian(np.array(r_mid) - a * np.array(c_mid), w)
+    resid = np.array(r_mid) - (a * np.array(c_mid) + b)
+    outliers = np.abs(resid) > dev_thr_s
+    if not outliers.any() or outliers.all():
+        return view  # 无离群或全体离群（趋势无定义，多为整段唱错歌）
+
+    c_times = np.asarray(c_times)
+    new_ct, new_cm, new_cv, new_map, new_costs = [], [], [], [], []
+    for i in range(nseg):
+        lo, hi = view.bounds[i], view.bounds[i + 1]
+        if i in set(np.array(seg_ids)[outliers]):
+            t0, t1 = view.ct[lo], view.ct[hi - 1]
+            pred0, pred1 = a * t0 + b - win_s, a * t1 + b + win_s
+            m = (c_times >= t0 - 0.1) & (c_times <= t1 + 0.1)
+            if m.sum() >= 100:
+                dtw = SubseqDTW(c_times[m], c_midi[m], c_voiced[m],
+                                r_times, r_midi, r_voiced, view.step)
+                mp2, cost2 = dtw.run(ref_t0=pred0, ref_t1=pred1)
+                ok2 = mp2 >= 0
+                old_cost = view.seg_costs[i][0]
+                if (ok2.sum() >= 10 and cost2 <= max_cost
+                        and cost2 <= old_cost * (1 - improve)):
+                    new_ct.append(dtw.ct[ok2]); new_cm.append(dtw.cm[ok2])
+                    new_cv.append(dtw.cv[ok2]); new_map.append(mp2[ok2])
+                    new_costs.append((cost2, int(ok2.sum())))
+                    continue
+        new_ct.append(view.ct[lo:hi]); new_cm.append(view.cm[lo:hi])
+        new_cv.append(view.cv[lo:hi]); new_map.append(view.mapping[lo:hi])
+        new_costs.append(view.seg_costs[i])
+    bounds = np.cumsum([0] + [len(a_) for a_ in new_map])
+    return AlignedView(np.concatenate(new_ct), np.concatenate(new_cm),
+                       np.concatenate(new_cv), view.rm, view.rv,
+                       np.concatenate(new_map), view.step, bounds, new_costs)
+
+
+def align_best(c_times, c_midi, c_voiced, r_times, r_midi, r_voiced,
+               lrc=None, topk=3, short_s=15.0, reanchor=True, **kw):
+    """对齐主入口：LRC 人声窗掩码 -> 调差投票 -> 全局顺序重锚定。
+
+    返回 (view, ks)；无法对齐返回 (None, 0)。
+    - LRC 掩码：过滤伴奏段被 Praat 误判 voiced 的污染帧，调差直方图与 DTW
+      同时生效（ref_f0 缓存文件不动，掩码在使用时现算）。
+    - 调差投票：单峰直方图在短唱段易错五度/关系大小调，逐候选全量对齐，
+      按 seg_costs 帧数加权总代价选最优。发声时长 <short_s 时直方图基本
+      无信息（实测单句 4s 场景 top3 全错、正确调差相关分排第 5），改为
+      全 13 候选投票——短段 DTW 快，代价曲面才是强信号（正确调差代价
+      0.495 vs 错误最优 0.93）。
+    - view.ambiguous: 最优与次优候选代价差 <0.1 时置 True（落点不可信，
+      上游应提示而非自信展示）。
+    """
+    r_voiced = np.asarray(r_voiced)
+    if lrc:
+        r_voiced = r_voiced & vocal_mask_from_lrc(lrc, r_times)
+    c_midi = np.asarray(c_midi, dtype=float)
+    c_times = np.asarray(c_times)
+    c_voiced = np.asarray(c_voiced)
+    if len(c_times) > 1:
+        frame_s = float(np.median(np.diff(c_times)))
+        voiced_s = float(c_voiced.sum()) * frame_s
+    else:
+        voiced_s = 0.0
+    k_eff = 13 if voiced_s < short_s else topk
+    best, runner = None, None
+    for ks, _s in estimate_key_shift_topk(c_midi, c_voiced, r_midi, r_voiced,
+                                          topk=k_eff):
+        view = align_multi(c_times, c_midi - ks, c_voiced,
+                           r_times, r_midi, r_voiced, **kw)
+        if view is None or len(view.ct) < 40:  # 2s 下限；更严阈值由调用方把控
+            continue
+        if reanchor:
+            view = reanchor_segments(view, c_times, c_midi - ks, c_voiced,
+                                     r_times, r_midi, r_voiced,
+                                     max_cost=kw.get("max_cost", 2.5))
+        n_tot = sum(n for _, n in view.seg_costs)
+        cost = sum(c * n for c, n in view.seg_costs) / max(n_tot, 1)
+        if best is None or cost < best[0]:
+            runner = best
+            best = (cost, ks, view)
+        elif runner is None or cost < runner[0]:
+            runner = (cost, ks, view)
+    if best is None:
+        return None, 0
+    margin = (runner[0] - best[0]) if runner else float("inf")
+    best[2].ambiguous = bool(margin < 0.1)
+    best[2].align_margin = round(float(margin), 3)
+    return best[2], best[1]
 
 
 def clip_pitch_score(clip_start, clip_end, view: AlignedView, mapping=None):

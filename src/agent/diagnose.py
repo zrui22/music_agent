@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from src.pitchref.f0 import extract_f0
-from src.pitchref.align import (estimate_key_shift, align_multi, clip_pitch_score,
+from src.pitchref.align import (align_best, clip_pitch_score,
                                 clip_rhythm_score, global_mapping_slope)
 from src.features.prosody import prosody_features
 from src.features.timbre import timbre_features
@@ -182,8 +182,8 @@ def _diagnose_impl(audio_path: str, song, auto_match: bool, n_windows: int,
     objective, pref, segments, phrases = None, {}, [], []
     if ref is not None:
         r_t, r_m, r_v = ref["f0"]
-        ks = estimate_key_shift(c_m, c_v, r_m, r_v)
-        view = align_multi(c_t, c_m - ks, c_v, r_t, r_m, r_v)
+        view, ks = align_best(c_t, c_m, c_v, r_t, r_m, r_v,
+                              lrc=ref.get("lrc"))
         if view is not None and len(view.ct) >= 100:
             g_slope = global_mapping_slope(view)
             ps = clip_pitch_score(0.0, dur, view)
@@ -192,6 +192,8 @@ def _diagnose_impl(audio_path: str, song, auto_match: bool, n_windows: int,
             cost = sum(c * n for c, n in view.seg_costs) / max(n_tot, 1)
             match.update({"key_shift": int(ks), "dtw_cost": round(float(cost), 3),
                           "ref_song": ref["song"], "ref_artists": ref["artists"]})
+            if getattr(view, "ambiguous", False):
+                match["ambiguous"] = True  # 调差投票前两名代价接近，落点不可全信
             if ps:
                 pref.update({k: ps[k] for k in ("median_abs_cents", "in_tune_ratio",
                                                 "octave_off_ratio")})
@@ -263,6 +265,9 @@ def _warnings(match, objective, c_v, diag_dur: float) -> list:
         n, dur = objective["pitch"]["n_frames"], diag_dur
         if n < min(300, 0.4 * dur * 20):  # 20 帧/秒(0.05s步长)，要求 40% 覆盖
             w.append(f"有效对齐帧覆盖偏低({n}帧/{dur:.0f}s)，客观音准分代表性有限")
+    if match.get("ambiguous"):
+        w.append("对齐落点置信度低（多个调差候选代价接近）：段落/乐句定位可能漂移，"
+                 "建议唱完整乐段或报歌名后重试")
     if c_v.mean() < 0.15:
         w.append("发声占比过低：可能是纯伴奏/说话，或人声分离缺失导致 F0 提取失败")
     return w
