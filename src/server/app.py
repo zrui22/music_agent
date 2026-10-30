@@ -216,6 +216,25 @@ async def library_add(req: Request):
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024   # 50MB
 
 
+def _json_safe(obj, _path="$", _bad=None):
+    """递归把 NaN/Inf 浮点替换为 None 并记录键路径（json.dumps 拒绝非有限浮点）。"""
+    import math
+    import numpy as _np
+    if _bad is None:
+        _bad = []
+    if isinstance(obj, (float, _np.floating)) and not isinstance(obj, bool):
+        f = float(obj)
+        if not math.isfinite(f):
+            _bad.append(_path)
+            return None
+        return f
+    if isinstance(obj, dict):
+        return {k: _json_safe(v, f"{_path}.{k}", _bad) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v, f"{_path}[{i}]", _bad) for i, v in enumerate(obj)]
+    return obj
+
+
 @app.post("/api/diagnose")
 async def api_diagnose(file: UploadFile = File(...), song: str = Form(""),
                        auto_match: bool = Form(True), windows: int = Form(5)):
@@ -237,7 +256,11 @@ async def api_diagnose(file: UploadFile = File(...), song: str = Form(""),
                                            n_windows=windows, scorer=get_scorer()))
             except Exception as e:
                 return JSONResponse({"error": f"{type(e).__name__}: {e}"}, 400)
-        return diag
+        _bad = []
+        safe = _json_safe(diag, _bad=_bad)
+        if _bad:
+            print(f"[diagnose] 非有限浮点已置 null: {_bad[:20]}", flush=True)
+        return safe
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

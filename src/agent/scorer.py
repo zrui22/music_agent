@@ -70,8 +70,16 @@ class Scorer:
             v = vals.get(k)
             if v is None:
                 continue
-            v = math.log1p(max(float(v), 0.0)) if k in LOG1P_KEYS else float(v)
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(v):   # NaN/Inf 特征按缺失处理（取总体均值，即 z=0）
+                continue
+            v = math.log1p(max(v, 0.0)) if k in LOG1P_KEYS else v
             z = (v - self.mean.get((g, k), 0.0)) / self.std.get((g, k), 1.0)
+            if not math.isfinite(z):
+                continue
             x[i] = float(np.clip(z, -5, 5))
         return x, 1.0
 
@@ -110,10 +118,13 @@ class Scorer:
                 acc[h].append(float(out[h].item()))
             if flog is not None:
                 facc.append(torch.sigmoid(flog[0]).float().cpu().numpy())
-        scores = {h: round(float(np.mean(v)), 2) for h, v in acc.items()}
+        def _fin(x, nd=2):
+            x = float(x)
+            return round(x, nd) if math.isfinite(x) else None
+        scores = {h: _fin(np.mean(v)) for h, v in acc.items()}
         if facc:
             from src.model.heads import FAULT_TYPES
             prob = np.mean(facc, axis=0)
-            scores["faults"] = {t: round(float(prob[i]), 3)
+            scores["faults"] = {t: _fin(prob[i], 3)
                                 for i, t in enumerate(FAULT_TYPES)}
         return scores

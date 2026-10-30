@@ -185,7 +185,8 @@ def resolve_best_version(song: str, cover_f0, cover_dur_s: float = 0,
         seen_dirs.add(str(ref["dir"]))
         cost, n_frames, ks = _align_cost(cover_f0, ref["f0"])
         tried.append({"ref_id": tag, "artists": ref.get("artists"),
-                      "cost": round(cost, 3), "n_frames": n_frames})
+                      "cost": round(cost, 3) if np.isfinite(cost) else None,
+                      "n_frames": n_frames})
         if n_frames >= 100 and (best is None or cost < best[0]):
             best = (cost, ks, ref)
 
