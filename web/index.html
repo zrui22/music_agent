@@ -214,6 +214,7 @@ canvas.radar{width:200px;height:200px}
       </div>
       <div id="avatarStatus" style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center">形象加载中…</div>
       <div class="switch"><input type="checkbox" id="ttsOn" checked><label for="ttsOn">语音朗读点评</label></div>
+      <button class="cbtn" id="btnStopSpeak" title="停止当前朗读" style="display:none;width:100%;margin-top:8px;color:#ff7b72;border-color:rgba(255,123,114,.45)">⏹ 停止朗读</button>
       <select id="ttsVoice" style="width:100%;margin-top:8px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--ink);font-size:13px;outline:none">
         <option value="paimon">🍀 派蒙（本地克隆·推荐）</option>
         <option value="zh-CN-XiaoyiNeural">🎀 元气少女（小艺·在线备用）</option>
@@ -399,16 +400,25 @@ function setSong(s){
   $('#songInp').value = curSong;
 }
 
-/* ================= TTS 朗读（分句队列：边播边预取下一段，长回复完整读完） ================= */
+/* ================= TTS 朗读（Web Audio 无缝排播：全部段落并发预取、依次无缝衔接；可随时停止） ================= */
 window.avatarSpeaking = false;
-let ttsAudio = null, ttsGen = 0;
+let ttsGen = 0, ttsCtx = null, ttsSources = [];
+function showStopBtn(on){
+  const b = $('#btnStopSpeak'); if(b) b.style.display = on ? 'block' : 'none';
+}
 function stopSpeak(){
   ttsGen++;                                   // 使进行中的队列失效
   if('speechSynthesis' in window) speechSynthesis.cancel();
-  if(ttsAudio){ try{ ttsAudio.pause(); }catch(e){} ttsAudio = null; }
+  ttsSources.forEach(s=>{ try{ s.stop(); }catch(e){} });
+  ttsSources = [];
   window.avatarSpeaking = false;
+  showStopBtn(false);
 }
-function splitForTTS(text, maxLen=120){
+/* 浏览器自动播放策略：AudioContext 需用户手势激活；挂起时在任何点击处恢复 */
+window.addEventListener('pointerdown', ()=>{
+  if(ttsCtx && ttsCtx.state === 'suspended') ttsCtx.resume().catch(()=>{});
+}, {passive:true});
+function splitForTTS(text, maxLen=120, firstMax=48){
   const clean = String(text).replace(/```[\s\S]*?```/g,'。').replace(/[*#`>\[\]]/g,'')
     .replace(/^[-·]\s*/gm,'').replace(/\s*\n+\s*/g,'。').replace(/[ \t]+/g,' ')
     .replace(/。{2,}/g,'。').trim().replace(/^[。 ]+|[。 ]+$/g,'');
@@ -425,24 +435,25 @@ function splitForTTS(text, maxLen=120){
     if(c.length <= maxLen*1.5){ out.push(c); continue; }
     for(let i=0;i<c.length;i+=maxLen) out.push(c.slice(i, i+maxLen));
   }
+  if(out.length && out[0].length > firstMax){   // 首段切短：合成快、开口早
+    const c = out.shift();
+    let k = -1;
+    for(const p of ['，','、','；','：',',',';']){ const j = c.lastIndexOf(p, firstMax); if(j > k) k = j; }
+    if(k < 10) k = firstMax - 1;                // 无合适标点则硬切
+    const rest = c.slice(k+1);
+    out.unshift(c.slice(0, k+1));
+    if(rest) out.splice(1, 0, rest);
+  }
   return out.filter(Boolean);
-}
-function playUrl(url, gen){
-  return new Promise(res=>{
-    if(gen!==ttsGen){ res(false); return; }
-    const au = ttsAudio = new Audio(url);
-    au.onended = ()=>{ if(ttsAudio===au) ttsAudio=null; res(true); };
-    au.onerror = ()=>{ if(ttsAudio===au) ttsAudio=null; res(false); };
-    au.play().catch(()=>res(false));
-  });
 }
 function speakBrowser(chunks, gen){        // 浏览器内置 TTS 兜底（同样分句串行，避开长文本中断 bug）
   if(!('speechSynthesis' in window)) return;
   const zh = speechSynthesis.getVoices().find(v=>/zh|中文|Chinese/i.test(v.lang+' '+v.name));
   window.avatarSpeaking = true;
+  showStopBtn(true);
   let i = 0;
   const next = ()=>{
-    if(gen!==ttsGen || i>=chunks.length){ if(gen===ttsGen) window.avatarSpeaking=false; return; }
+    if(gen!==ttsGen || i>=chunks.length){ if(gen===ttsGen){ window.avatarSpeaking=false; showStopBtn(false); } return; }
     const u = new SpeechSynthesisUtterance(chunks[i++]);
     u.lang='zh-CN'; u.rate=1.12; u.pitch=1.35;
     if(zh) u.voice=zh;
@@ -458,23 +469,48 @@ async function speakText(text){
   if(!chunks.length) return;
   const gen = ++ttsGen;
   const voice = localStorage.getItem('ttsVoice') || 'paimon';
-  const fetchChunk = (i)=>fetch(apiBase()+'/api/tts', {method:'POST',
+  const fetchBuf = (i)=>fetch(apiBase()+'/api/tts', {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:chunks[i], voice})})
-    .then(r=>{ if(!r.ok) throw new Error('tts '+r.status); return r.blob(); })
-    .then(b=>URL.createObjectURL(b));
-  let pending = fetchChunk(0);
-  try{ await pending; }catch(e){ speakBrowser(chunks, gen); return; }  // 后端不通→浏览器 TTS
+    .then(r=>{ if(!r.ok) throw new Error('tts '+r.status); return r.arrayBuffer(); })
+    .then(ab=>ttsCtx.decodeAudioData(ab));
+  try{
+    ttsCtx = ttsCtx || new (window.AudioContext||window.webkitAudioContext)();
+    ttsCtx.resume().catch(()=>{});          // 挂起也不阻塞：排播时间在挂起时冻结，恢复后无缝续播
+  }catch(e){ speakBrowser(chunks, gen); return; }
+  let firstBuf;
+  try{ firstBuf = await fetchBuf(0); }catch(e){ speakBrowser(chunks, gen); return; }  // 后端不通→浏览器 TTS
+  if(gen!==ttsGen) return;
   window.avatarSpeaking = true;
+  showStopBtn(true);
+  const bufs = [firstBuf];
+  for(let i=1; i<chunks.length; i++) bufs.push(fetchBuf(i));   // 全部并发预取（后端 sidecar 串行合成、按序返回）
+  let nextStart = ttsCtx.currentTime + 0.06, lastSrc = null;
+  const finish = ()=>{ if(gen===ttsGen){ window.avatarSpeaking=false; showStopBtn(false); } };
+  const swallowRest = k=>{ for(let j=k; j<bufs.length; j++) Promise.resolve(bufs[j]).catch(()=>{}); };
   for(let i=0; i<chunks.length; i++){
-    if(gen!==ttsGen){ pending.then(u=>URL.revokeObjectURL(u)).catch(()=>{}); return; }
-    let url;
-    try{ url = await pending; }catch(e){ break; }
-    pending = (i+1<chunks.length) ? fetchChunk(i+1) : null;   // 播放当前段的同时预取下一段
-    const ok = await playUrl(url, gen);
-    URL.revokeObjectURL(url);
-    if(!ok || gen!==ttsGen) return;
+    if(gen!==ttsGen){ swallowRest(i); return; }
+    let buf;
+    try{ buf = await bufs[i]; }catch(e){
+      swallowRest(i+1);                   // 吞掉未消费段的异常
+      break;
+    }
+    if(gen!==ttsGen){ swallowRest(i+1); return; }
+    const src = ttsCtx.createBufferSource();
+    src.buffer = buf; src.connect(ttsCtx.destination);
+    const when = Math.max(nextStart, ttsCtx.currentTime + 0.02);  // 无缝衔接：接上一段结尾
+    src.start(when);
+    nextStart = when + buf.duration;
+    lastSrc = src;
+    ttsSources.push(src);
+    src.onended = ()=>{
+      const k = ttsSources.indexOf(src); if(k>=0) ttsSources.splice(k,1);
+    };
   }
-  if(gen===ttsGen) window.avatarSpeaking=false;
+  if(lastSrc){                        // 无论正常读完还是中途 break，最后一段播完统一收尾
+    const tail = lastSrc;
+    const prev = tail.onended;
+    tail.onended = ()=>{ prev && prev(); finish(); };
+  } else finish();
 }
 /* 3D 形象兜底提示：10 秒后仍未就绪则说明资源未加载 */
 setTimeout(()=>{
@@ -721,6 +757,7 @@ async function coachReview(diag){
 
 /* ================= 聊天 ================= */
 async function sendChat(text){
+  stopSpeak();                               // 发新消息时停止上一条朗读
   addMsg('user', esc(text));
   if(!llmReady()){ addMsg('sys','点右上角「⚙ API」填入 LLM 配置后即可对话'); return; }
   const typing = addTyping();
@@ -745,6 +782,7 @@ let mediaRec = null, recChunks = [], recStream = null, recTimer = null, recT0 = 
 function fmtDur(s){ s=Math.max(0,Math.round(s)); return (s/60|0)+':'+String(s%60).padStart(2,'0'); }
 async function toggleRec(){
   if(recStream){ stopRec(); return; }
+  stopSpeak();                               // 开始录音时停止朗读，避免声音被录进去
   if(!navigator.mediaDevices?.getUserMedia){ toast('当前浏览器/环境不支持录音（需 https 或 localhost）', true); return; }
   try{
     recStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1, echoCancellation:true}});
@@ -783,7 +821,9 @@ function showRecPreview(blob, secs){
       <button class="cbtn" style="padding:7px 14px;font-size:13px">✕ 丢弃重录</button>
     </div>`;
   const [ok, no] = d.querySelectorAll('.ops button');
+  d.querySelector('audio').addEventListener('play', stopSpeak);   // 试听录音时停掉朗读，避免叠音
   ok.onclick = ()=>{
+    stopSpeak();
     d.querySelector('.ops').innerHTML = '<span style="font-size:12px;color:var(--muted)">已发送，评测中…</span>';
     runDiagnose(blob, 'record.webm');
   };
@@ -1040,9 +1080,11 @@ async function loadHealth(){
 $('#btnSend').onclick = ()=>{ const v=$('#inp').value.trim(); if(v){ $('#inp').value=''; sendChat(v);} };
 $('#inp').addEventListener('keydown', e=>{ if(e.key==='Enter') $('#btnSend').click(); });
 $('#btnRec').onclick = toggleRec;
+$('#btnStopSpeak').onclick = stopSpeak;
 $('#btnFile').onclick = ()=> $('#fileInp').click();
 $('#fileInp').addEventListener('change', e=>{
   const f = e.target.files[0]; if(!f) return;
+  stopSpeak();
   addMsg('user', `📁 <i>（上传音频 ${esc(f.name)}）</i>`);
   runDiagnose(f, f.name);
   e.target.value='';
